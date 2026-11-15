@@ -17,23 +17,45 @@ export default function GuestPage({onOwnerLogin}:{onOwnerLogin:()=>void}) {
   const [section,setSection] = useState<'questions' | 'knowledge' | 'status'>('questions')
   const [status,setStatus] = useState<GuestStatus | null>(null)
   const [projects,setProjects] = useState<Project[]>([])
+  const [projectsLoading,setProjectsLoading] = useState(true)
+  const [projectsLoaded,setProjectsLoaded] = useState(false)
+  const [projectError,setProjectError] = useState('')
   const [entries,setEntries] = useState<Entry[]>([])
   const [knowledge,setKnowledge] = useState<Knowledge | null>(null)
   const [message,setMessage] = useState('')
   const [busy,setBusy] = useState(false)
+
+  async function loadProjects(signal?: AbortSignal) {
+    setProjectsLoading(true); setProjectError('')
+    try {
+      const result = await getJson<Project[]>('/api/guest/projects', {signal})
+      if (!signal?.aborted) { setProjects(result); setProjectsLoaded(true); setEntries([]); setKnowledge(null) }
+    } catch (error) {
+      if (!signal?.aborted) { setProjectError((error as Error).message); setProjects([]); setEntries([]); setKnowledge(null) }
+    } finally {
+      if (!signal?.aborted) setProjectsLoading(false)
+    }
+  }
 
   useEffect(()=>{
     const controller = new AbortController()
     async function start() {
       try {
         await getJson('/api/guest/session', {method:'POST', signal:controller.signal})
-        const response = await fetch('/api/guest/status', {credentials:'same-origin',signal:controller.signal})
-        if (response.ok) setStatus(await response.json())
-        else if (response.status !== 404) throw new Error('无法读取当前工作状态。')
-        setProjects(await getJson<Project[]>('/api/guest/projects',{signal:controller.signal}))
       } catch (error) {
-        if (!controller.signal.aborted) setMessage((error as Error).message)
+        if (!controller.signal.aborted) { setProjectError((error as Error).message); setProjectsLoading(false) }
+        return
       }
+      const statusRequest = (async () => {
+        try {
+          const response = await fetch('/api/guest/status', {credentials:'same-origin',signal:controller.signal})
+          if (response.ok) setStatus(await response.json())
+          else if (response.status !== 404) setMessage('无法读取当前工作状态。')
+        } catch {
+          if (!controller.signal.aborted) setMessage('无法读取当前工作状态。')
+        }
+      })()
+      await Promise.all([statusRequest, loadProjects(controller.signal)])
     }
     void start()
     return ()=>controller.abort()
@@ -53,7 +75,11 @@ export default function GuestPage({onOwnerLogin}:{onOwnerLogin:()=>void}) {
   return <div className="shell"><aside className="sidebar"><div className="brand"><span className="mark">W</span><div>HMW <small>WORKBENCH</small></div></div><p className="caption">探索工作台</p><nav className="side-nav" aria-label="访客导航"><button type="button" className={section === 'questions' ? 'nav-item active' : 'nav-item'} aria-current={section === 'questions' ? 'page' : undefined} onClick={()=>setSection('questions')}><NavigationIcon name="ask" />问一问</button><button type="button" className={section === 'knowledge' ? 'nav-item active' : 'nav-item'} aria-current={section === 'knowledge' ? 'page' : undefined} onClick={()=>setSection('knowledge')}><NavigationIcon name="knowledge" />项目知识</button><button type="button" className={section === 'status' ? 'nav-item active' : 'nav-item'} aria-current={section === 'status' ? 'page' : undefined} onClick={()=>setSection('status')}><NavigationIcon name="person" />关于我</button></nav><div className="sidebar-bottom"><span className="avatar guest-avatar">访</span><div><strong>访客空间</strong><small>临时访问会话</small></div></div></aside><main>
     <header className="topbar"><div><span className="eyebrow">HMW / {section === 'questions' ? '问一问' : section === 'knowledge' ? '项目知识' : '关于我'}</span><h1>{section === 'questions' ? '有什么可以帮你查找？' : section === 'knowledge' ? '项目知识' : '关于我'}</h1><p>{section === 'questions' ? '从分享的资料中寻找有出处的信息。' : section === 'knowledge' ? '浏览负责人分享的项目资料。' : '了解负责人分享的工作状态。'}</p></div><button type="button" className="secondary" onClick={onOwnerLogin}>负责人登录</button></header>
     <div hidden={section !== 'status'}>    <section className="card"><h2>关于我 · 当前工作状态</h2>{status ? <><p>{status.focus}</p><p>进度：{status.progress === null ? '未填写' : `${status.progress}%`}</p><p>截至手动更新：{new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai', dateStyle:'short', timeStyle:'short'}).format(new Date(status.updated_at))}（北京时间）</p>{status.allocations?.length > 0 && <><h3>每周投入</h3><ul>{status.allocations.map((item,index)=><li key={index}>{item.project_name} · {item.week} · {item.unit === 'hours' ? '小时' : '%'} · 计划 {item.planned ?? '未填'} / 实际 {item.actual ?? '未填'}</li>)}</ul></>}</> : <p>暂未发布工作状态。</p>}</section></div>
-    <div hidden={section !== 'questions'}><GuestQuestions projects={projects} /></div><div hidden={section !== 'knowledge'}><section className="card knowledge-import"><h2>项目知识</h2>{projects.length === 0 && <p>暂无分享的项目知识。</p>}<div className="actions">{projects.map(project=><button type="button" className="secondary" disabled={busy} key={project.id} onClick={()=>openProject(project)}>{project.name}</button>)}</div>
+    <div hidden={section !== 'questions'}><GuestQuestions projects={projects} />
+      {projectsLoading && <p role="status">正在加载项目列表…</p>}
+      {!projectsLoading && !projectError && projectsLoaded && projects.length === 0 && <p>暂无可选择的项目。请联系负责人发布知识并允许访客查看。</p>}
+      {projectError && <p role="status">项目列表加载失败：{projectError}</p>}
+      <button type="button" className="secondary" disabled={projectsLoading} onClick={()=>loadProjects()}>刷新项目列表</button></div><div hidden={section !== 'knowledge'}><section className="card knowledge-import"><h2>项目知识</h2>{projects.length === 0 && <p>暂无分享的项目知识。</p>}<div className="actions">{projects.map(project=><button type="button" className="secondary" disabled={busy} key={project.id} onClick={()=>openProject(project)}>{project.name}</button>)}</div>
       {entries.length > 0 && <ul>{entries.map(entry=><li key={entry.id}><button type="button" className="secondary" disabled={busy} onClick={()=>openEntry(entry)}>{entry.filename}</button></li>)}</ul>}
       {knowledge && <div><h3>来源：{knowledge.source.filename}</h3><a href={`/api/guest/sources/${encodeURIComponent(knowledge.source.id)}/download`}>下载原文件</a><p>{knowledge.locator.kind === 'docx' ? '来源：Word 段落与表格' : knowledge.locator.kind === 'pptx' ? '来源：PowerPoint 幻灯片与元素' : `来源行 ${knowledge.locator.start_line}–${knowledge.locator.end_line}`}</p><pre>{knowledge.content}</pre></div>}
     </section></div>{message && <p role="status" className="notice">{message}</p>}

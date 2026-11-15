@@ -41,3 +41,25 @@ it('switches between questions, shared knowledge and owner status', async () => 
   fireEvent.click(screen.getByRole('button',{name:'关于我'}))
   expect(screen.getByRole('heading',{name:'关于我 · 当前工作状态'})).toBeTruthy()
 })
+
+it('loads shared projects even when owner status cannot be read', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce(new Response('{}'))
+    .mockResolvedValueOnce(new Response('', {status:500}))
+    .mockResolvedValueOnce(new Response(JSON.stringify([{id:'p1',name:'共享项目'}]))))
+  render(<GuestPage onOwnerLogin={()=>{}} />)
+  expect(await screen.findByRole('option',{name:'共享项目'})).toBeTruthy()
+  expect(screen.getByText('无法读取当前工作状态。')).toBeTruthy()
+})
+
+it('explains empty projects and refreshes after knowledge is shared', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce(new Response('{}'))
+    .mockResolvedValueOnce(new Response('', {status:404}))
+    .mockResolvedValueOnce(new Response('[]'))
+    .mockResolvedValueOnce(new Response(JSON.stringify([{id:'p1',name:'新分享的项目'}]))))
+  render(<GuestPage onOwnerLogin={()=>{}} />)
+  await screen.findByText('暂无可选择的项目。请联系负责人发布知识并允许访客查看。')
+  fireEvent.click(screen.getByRole('button',{name:'刷新项目列表'}))
+  expect(await screen.findByRole('option',{name:'新分享的项目'})).toBeTruthy()
+})

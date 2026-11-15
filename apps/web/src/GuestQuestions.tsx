@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react'
+import { FormEvent, useEffect, useState } from 'react'
 
 type Project = {id:string; name:string}
 type Locator = {kind?:string; start_line?:number; end_line?:number; index?:number; block_kind?:string; slide?:number; element?:number}
@@ -17,6 +17,12 @@ export default function GuestQuestions({projects}:{projects:Project[]}) {
   const [answer,setAnswer] = useState<Answer | null>(null)
   const [error,setError] = useState('')
   const [busy,setBusy] = useState(false)
+
+  useEffect(() => {
+    if (project && !projects.some(item => item.id === project)) {
+      setProject(''); setAnswer(null)
+    }
+  }, [project, projects])
 
   async function ask(event:FormEvent) {
     event.preventDefault()
