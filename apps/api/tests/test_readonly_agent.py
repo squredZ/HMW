@@ -210,6 +210,6 @@ def test_model_can_abstain_when_evidence_does_not_answer_question(tmp_path):
         submit(owner, app, root, project, csrf, '这是产品规范。', share=True)
         guest.post('/api/guest/session')
         result = guest.post('/api/guest/questions',json={'project_id':project,'question':'发动机散热'}).json()
-        assert result['kind'] == 'insufficient_evidence' and len(calls) == 1
+        assert result['kind'] == 'insufficient_evidence' and result['agent_invoked'] is True and len(calls) == 1
         assert 'agent_unavailable' not in result
         assert result['evidence'] == []

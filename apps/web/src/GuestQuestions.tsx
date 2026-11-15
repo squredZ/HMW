@@ -3,7 +3,7 @@ import { FormEvent, useEffect, useState } from 'react'
 type Project = {id:string; name:string}
 type Locator = {kind?:string; start_line?:number; end_line?:number; index?:number; block_kind?:string; slide?:number; element?:number}
 type Evidence = {knowledge_id:string; source_id:string; filename:string; locator:Locator; excerpt:string}
-type Answer = {kind:'extractive' | 'insufficient_evidence' | 'generated'; message:string; search_limited:boolean; unavailable_sources?:number; agent_unavailable?:boolean; retrieval_mode?:'keyword' | 'context'; citations?:number[]; evidence:Evidence[]}
+type Answer = {kind:'extractive' | 'insufficient_evidence' | 'generated'; message:string; search_limited:boolean; unavailable_sources?:number; agent_unavailable?:boolean; agent_invoked?:boolean; retrieval_mode?:'keyword' | 'context'; citations?:number[]; evidence:Evidence[]}
 
 function location(locator:Locator):string {
   if (locator.kind === 'docx') return `${locator.block_kind === 'table' ? '表格' : '段落'} ${locator.index}`
@@ -39,7 +39,7 @@ export default function GuestQuestions({projects}:{projects:Project[]}) {
     <form onSubmit={ask}><label>问答项目<select value={project} disabled={busy} onChange={event=>{setProject(event.target.value);setAnswer(null)}}><option value="">选择项目</option>{projects.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
       <label>问题<textarea value={question} onChange={event=>setQuestion(event.target.value)} maxLength={240} rows={3} placeholder="输入你想了解的问题，例如：项目接口规范是什么？" /></label><button disabled={busy || !project || question.trim().length < 2}>{busy ? '正在查找依据，请稍候…' : '查找依据'}</button>
     </form>
-    {error && <p role="status">{error}</p>}{answer && <div>{answer.kind === 'generated' && <p>AI 生成，请核对来源。</p>}{answer.kind === 'generated' && answer.retrieval_mode === 'context' && <p>未命中关键词，已使用有限的公开资料上下文。</p>}{answer.agent_unavailable && <p>模型暂不可用，以下为原文检索结果。</p>}<p>{answer.message}</p>{answer.search_limited && <p>本次仅检索了部分资料，请缩小范围或补充关键词。</p>}{(answer.unavailable_sources ?? 0) > 0 && <p>部分来源暂时无法校验，已从结果中排除。</p>}
+    {error && <p role="status">{error}</p>}{answer && <div>{answer.kind === 'insufficient_evidence' && answer.agent_invoked && !answer.agent_unavailable && <p>Agent 已检查可用资料，未找到足够依据。</p>}{answer.kind === 'insufficient_evidence' && !answer.agent_invoked && <p>没有可用于分析的资料，本次未调用 Agent。</p>}{answer.kind === 'extractive' && !answer.agent_invoked && <p>当前仅展示检索原文；如需 AI 回答，请确认模型已启用。</p>}{answer.kind === 'generated' && <p>AI 生成，请核对来源。</p>}{answer.kind === 'generated' && answer.retrieval_mode === 'context' && <p>未命中关键词，已使用有限的公开资料上下文。</p>}{answer.agent_unavailable && <p>模型暂不可用，以下为原文检索结果。</p>}<p>{answer.message}</p>{answer.search_limited && <p>本次仅检索了部分资料，请缩小范围或补充关键词。</p>}{(answer.unavailable_sources ?? 0) > 0 && <p>部分来源暂时无法校验，已从结果中排除。</p>}
       {answer.evidence.map((item,index)=><article key={`${item.knowledge_id}-${index}`}><p>{answer.kind === 'generated' && `[${index + 1}] `}{item.filename} · {location(item.locator)}</p><blockquote>{item.excerpt}</blockquote><a href={`/api/guest/sources/${encodeURIComponent(item.source_id)}/download`}>下载来源</a></article>)}
     </div>}
   </section>

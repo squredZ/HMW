@@ -59,3 +59,12 @@ it('asks the visitor to retry when sources change during generation', async () =
   fireEvent.click(screen.getByRole('button',{name:'查找依据'}))
   await screen.findByText('资料的可见范围或内容已发生变化，请重新提问。')
 })
+
+it('explains when the agent assessed the materials but could not answer', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({kind:'insufficient_evidence',message:'现有资料不足以回答，请补充信息或联系负责人。',agent_invoked:true,search_limited:false,evidence:[]}))))
+  render(<GuestQuestions projects={[{id:'p1',name:'项目一'}]} />)
+  fireEvent.change(screen.getByLabelText('问答项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('问题'),{target:{value:'接口版本'}})
+  fireEvent.click(screen.getByRole('button',{name:'查找依据'}))
+  await screen.findByText('Agent 已检查可用资料，未找到足够依据。')
+})

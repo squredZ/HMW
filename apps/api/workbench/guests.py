@@ -102,6 +102,7 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
         agent = getattr(app.state, 'answer_agent', None)
         result = guest_extract(engine, owner_id, payload.project_id, payload.question, object_root, max_file_bytes, include_context=agent is not None)
         if agent is not None and result['evidence']:
+            result['agent_invoked'] = True
             candidate = None
             try:
                 candidate = validate_answer(agent.answer(payload.question, result['evidence']), len(result['evidence']))
