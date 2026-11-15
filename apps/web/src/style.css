@@ -465,3 +465,21 @@ button:focus-visible, a:focus-visible {
     transition:background-color .18s ease, box-shadow .18s ease;
   }
 }
+
+.manual-import {
+  margin:24px 0;
+  padding:16px 18px;
+  border:1px solid #e8eee9;
+  border-radius:16px;
+  background:#fafcfb;
+}
+.manual-import summary {
+  color:#3f6955;
+  font-size:14px;
+  font-weight:650;
+  cursor:pointer;
+}
+.manual-import p {
+  color:#788479;
+  font-size:13px;
+}

@@ -114,3 +114,43 @@ it('shares knowledge only after the owner explicitly selects guest visibility', 
   await screen.findByText('访客可见范围已更新')
   expect(JSON.parse(fetcher.mock.calls[4][1].body)).toEqual({visible:false})
 })
+
+it('imports manually entered text through the same draft workflow', async () => {
+  const fetcher = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({jobs:['text-job']}),{status:202}))
+  vi.stubGlobal('fetch', fetcher)
+  render(<KnowledgeImport csrf="token" projects={[{id:'p1',name:'项目一',role:'owner'}]} />)
+  fireEvent.change(screen.getByLabelText('导入项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('知识标题'),{target:{value:'接口说明'}})
+  fireEvent.change(screen.getByLabelText('知识内容'),{target:{value:'这是一段知识。'}})
+  fireEvent.click(screen.getByRole('button',{name:'导入文字'}))
+  await screen.findByText(/导入任务已提交/)
+  const uploaded = (fetcher.mock.calls[0][1].body as FormData).get('files') as File
+  expect(uploaded.name).toBe('接口说明.txt')
+  expect(uploaded.size).toBe(new TextEncoder().encode('这是一段知识。').length)
+  expect(fetcher.mock.calls[0][0]).toBe('/api/projects/p1/imports')
+})
+
+it('explains when an import is waiting for a worker', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({jobs:['j1']}),{status:202}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({state:'queued',result:null}),{status:200})))
+  render(<KnowledgeImport csrf="token" projects={[{id:'p1',name:'项目一',role:'owner'}]} />)
+  fireEvent.change(screen.getByLabelText('导入项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('选择知识文件'),{target:{files:[new File(['source'],'a.txt')]}})
+  fireEvent.click(screen.getByRole('button',{name:'提交导入'}))
+  await screen.findByText(/导入任务已提交/)
+  fireEvent.click(screen.getByRole('button',{name:'刷新任务'}))
+  await screen.findByText(/等待 Worker 领取/)
+})
+
+it('automatically loads the completed draft after an import', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({jobs:['j1']}),{status:202}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({state:'completed',result:{knowledge_id:'k1'}})))
+    .mockResolvedValueOnce(new Response(JSON.stringify({id:'k1',state:'draft',guest_visible:false,content:'自动预览内容',locator:{start_line:1,end_line:1},source:{id:'s1',filename:'a.txt'}}))))
+  render(<KnowledgeImport csrf="token" projects={[{id:'p1',name:'项目一',role:'owner'}]} />)
+  fireEvent.change(screen.getByLabelText('导入项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('选择知识文件'),{target:{files:[new File(['source'],'a.txt')]}})
+  fireEvent.click(screen.getByRole('button',{name:'提交导入'}))
+  await screen.findByText('自动预览内容', {}, {timeout:5000})
+})
