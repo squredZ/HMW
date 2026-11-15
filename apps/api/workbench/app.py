@@ -10,15 +10,17 @@ from secrets import compare_digest, token_urlsafe
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import JSON, DateTime, Integer, String, create_engine, select
+from sqlalchemy import JSON, DateTime, Integer, String, create_engine, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 from sqlalchemy.orm.exc import StaleDataError
 
 from workbench.audit import record_audit
+from workbench.issues.models import Issue
+from workbench.issues.body_limit import IssueBodyLimit
 from workbench.db import Base
 from workbench.request_logging import install_request_logging
 from workbench.projects.models import Project, ProjectMember
@@ -108,6 +110,7 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
     app.state.engine = engine
     object_root = Path(storage_root or os.environ.get("HMW_STORAGE_ROOT", "./workbench-objects"))
 
+    app.add_middleware(IssueBodyLimit)
     app.add_middleware(UploadLimitMiddleware, max_body_bytes=max_file_bytes * max_batch_files + 1024 * 1024)
     install_request_logging(app)
     sessions = SessionStore()
@@ -314,6 +317,37 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
             record_audit(db, actor_id=user, action="personal.withdrawn", resource_id=row.id,
                          resource_version=row.version, request_id=request.state.request_id)
             return snapshot(row)
+
+    @app.get('/api/issues')
+    def list_issues(request: Request, response: Response, limit: int = Query(default=50, ge=1, le=100),
+                    offset: int = Query(default=0, ge=0, le=10000),
+                    x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, None)
+        response.headers['Cache-Control'] = 'no-store'
+        with Session(engine) as db:
+            rows = db.execute(select(Issue, Project.name).join(Project, Project.id == Issue.project_id)
+                              .where(Project.owner == user).order_by(Issue.created_at.desc(), Issue.id.desc())
+                              .offset(offset).limit(limit + 1)).all()
+            return {'items': [{'id':issue.id, 'project_id':issue.project_id, 'project_name':name,
+                               'title':issue.title, 'description':issue.description, 'state':issue.state,
+                               'created_at':issue.created_at.isoformat()} for issue, name in rows[:limit]],
+                    'has_more':len(rows) > limit}
+
+    @app.post('/api/issues/{issue_id}/resolve')
+    def resolve_issue(issue_id: str, request: Request, x_user_id: str | None = Header(default=None),
+                      x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        with Session(engine) as db, db.begin():
+            issue = db.get(Issue, issue_id)
+            if issue is None or not db.scalar(select(Project.id).where(Project.id == issue.project_id, Project.owner == user)):
+                raise HTTPException(404, 'Not found')
+            changed = db.execute(update(Issue).where(Issue.id == issue_id, Issue.state == 'new')
+                                 .values(state='resolved', version=Issue.version + 1)).rowcount
+            if changed != 1:
+                raise HTTPException(409, 'Issue is not new')
+            record_audit(db, actor_id=user, action='issue.resolved', resource_id=issue_id,
+                         request_id=request.state.request_id, details={'project_id':issue.project_id})
+        return {'id':issue_id, 'state':'resolved'}
 
     install_knowledge_routes(app, engine, actor, object_root, max_file_bytes, max_batch_files)
     install_guest_routes(app, engine, dev_users, object_root, max_file_bytes, Status, StatusVersion)

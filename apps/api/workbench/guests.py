@@ -12,14 +12,23 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from workbench.audit import record_audit
+from workbench.issues.models import Issue
 from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
 from workbench.knowledge.source_access import verified_download
-from workbench.projects.models import Project
+from workbench.projects.models import Project, ProjectMember
 from workbench.sessions import SessionStore
 from workbench.questions.retrieval import guest_extract
 
 
 question_logger = logging.getLogger('workbench.questions')
+
+
+class GuestIssue(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    project_id: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(min_length=1, max_length=10000)
 
 
 class GuestQuestion(BaseModel):
@@ -42,11 +51,13 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
             response.headers['Cache-Control'] = 'no-store'
         return response
 
-    def require_guest(request: Request) -> None:
+    def require_guest(request: Request) -> str:
         if owner_id is None:
             raise HTTPException(404, 'Not found')
-        if guests.get(request.cookies.get('hmw_guest', ''), datetime.now(timezone.utc)) is None:
+        session = guests.get(request.cookies.get('hmw_guest', ''), datetime.now(timezone.utc))
+        if session is None:
             raise HTTPException(401, 'Guest session required')
+        return session[0]
 
     @app.post('/api/guest/session')
     def start_guest(request: Request, response: Response):
@@ -60,6 +71,29 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
         response.set_cookie('hmw_guest', token, httponly=True, samesite='strict')
         response.headers['Cache-Control'] = 'no-store'
         return {'kind':'guest'}
+
+    @app.post('/api/guest/issues', status_code=201)
+    def submit_issue(payload: GuestIssue, request: Request):
+        visitor_id = require_guest(request)
+        with Session(engine) as db, db.begin():
+            # Sharing changes lock the same membership row before the version.
+            membership = db.scalar(select(ProjectMember).where(ProjectMember.project_id == payload.project_id,
+                                   ProjectMember.user_id == owner_id).with_for_update())
+            if membership is None or membership.role not in ('owner', 'maintainer'):
+                raise HTTPException(404, 'Not found')
+            visible = db.scalar(select(Project.id).join(KnowledgeVersion, KnowledgeVersion.project_id == Project.id)
+                                .join(GuestPublication, GuestPublication.version_id == KnowledgeVersion.id)
+                                .where(Project.id == payload.project_id, Project.owner == owner_id,
+                                       KnowledgeVersion.state == 'published').limit(1))
+            if visible is None:
+                raise HTTPException(404, 'Not found')
+            issue_id = str(uuid4())
+            db.add(Issue(id=issue_id, project_id=payload.project_id, visitor_id=visitor_id,
+                         title=payload.title, description=payload.description, state='new',
+                         version=1, created_at=datetime.now(timezone.utc)))
+            record_audit(db, actor_id=visitor_id, action='issue.submitted', resource_id=issue_id,
+                         request_id=request.state.request_id, details={'project_id':payload.project_id})
+        return {'id':issue_id, 'state':'new'}
 
     @app.post('/api/guest/questions')
     def ask_question(payload: GuestQuestion, request: Request):
