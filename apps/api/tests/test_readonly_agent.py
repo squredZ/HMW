@@ -91,13 +91,14 @@ def test_invalid_model_citations_fall_back_to_verified_evidence(tmp_path):
         assert '虚构' not in str(response)
 
 
-def test_no_evidence_never_calls_agent(tmp_path):
+def test_no_evidence_never_calls_agent(tmp_path, monkeypatch):
     root = tmp_path / 'objects'
     app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", dev_users={'owner':'password'}, storage_root=root)
     class ForbiddenAgent:
         def answer(self, question, evidence):
             raise AssertionError('agent must not run without evidence')
     app.state.answer_agent = ForbiddenAgent()
+    monkeypatch.setattr('workbench.questions.retrieval._source_valid', lambda *args: False)
     with TestClient(app) as owner, TestClient(app) as guest:
         csrf = {'X-CSRF-Token':owner.post('/api/dev/session',json={'username':'owner','password':'password'}).json()['csrf_token']}
         pid = owner.post('/api/projects',headers=csrf,json={'name':'A'}).json()['id']
@@ -171,3 +172,44 @@ def test_child_timeout_terminates_and_releases_resources():
     from workbench.questions.agent import AgentError, run_bounded_process
     with pytest.raises(AgentError, match='timeout'):
         run_bounded_process([sys.executable, '-c', 'import time;time.sleep(10)'], b'', dict(os.environ), timeout=0.1)
+
+
+def test_agent_can_assess_authorized_context_when_keywords_do_not_match(tmp_path):
+    root = tmp_path / 'objects'
+    app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", dev_users={'owner':'password'}, storage_root=root)
+    calls = []
+    class FakeAgent:
+        def answer(self, question, evidence):
+            calls.append(evidence)
+            return {'answer':'资料介绍了项目的背景 [1]。', 'citations':[1]}
+    app.state.answer_agent = FakeAgent()
+    with TestClient(app) as owner, TestClient(app) as guest:
+        csrf = {'X-CSRF-Token':owner.post('/api/dev/session',json={'username':'owner','password':'password'}).json()['csrf_token']}
+        project = owner.post('/api/projects',headers=csrf,json={'name':'A'}).json()['id']
+        submit(owner, app, root, project, csrf, '项目背景：提供可靠的数据同步服务。', share=True)
+        submit(owner, app, root, project, csrf, '绝密资料仅本人可见。', share=False)
+        guest.post('/api/guest/session')
+        result = guest.post('/api/guest/questions',json={'project_id':project,'question':'请简单介绍一下'}).json()
+        assert result['kind'] == 'generated' and len(calls) == 1
+        assert result['retrieval_mode'] == 'context'
+        assert '绝密' not in str(calls)
+
+
+def test_model_can_abstain_when_evidence_does_not_answer_question(tmp_path):
+    root = tmp_path / 'objects'
+    app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", dev_users={'owner':'password'}, storage_root=root)
+    calls = []
+    class AbstainingAgent:
+        def answer(self, question, evidence):
+            calls.append(evidence)
+            return {'answer':'没有足够的信息。', 'citations':[]}
+    app.state.answer_agent = AbstainingAgent()
+    with TestClient(app) as owner, TestClient(app) as guest:
+        csrf = {'X-CSRF-Token':owner.post('/api/dev/session',json={'username':'owner','password':'password'}).json()['csrf_token']}
+        project = owner.post('/api/projects',headers=csrf,json={'name':'A'}).json()['id']
+        submit(owner, app, root, project, csrf, '这是产品规范。', share=True)
+        guest.post('/api/guest/session')
+        result = guest.post('/api/guest/questions',json={'project_id':project,'question':'发动机散热'}).json()
+        assert result['kind'] == 'insufficient_evidence' and len(calls) == 1
+        assert 'agent_unavailable' not in result
+        assert result['evidence'] == []

@@ -99,8 +99,8 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
     @app.post('/api/guest/questions')
     def ask_question(payload: GuestQuestion, request: Request):
         require_guest(request)
-        result = guest_extract(engine, owner_id, payload.project_id, payload.question, object_root, max_file_bytes)
         agent = getattr(app.state, 'answer_agent', None)
+        result = guest_extract(engine, owner_id, payload.project_id, payload.question, object_root, max_file_bytes, include_context=agent is not None)
         if agent is not None and result['evidence']:
             candidate = None
             try:
@@ -111,17 +111,22 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
             # Both generated and fallback results must respect changes during the model call.
             require_guest(request)
             try:
-                current = guest_extract(engine, owner_id, payload.project_id, payload.question, object_root, max_file_bytes)
+                current = guest_extract(engine, owner_id, payload.project_id, payload.question, object_root, max_file_bytes, include_context=True)
             except HTTPException as exc:
                 if exc.status_code != 404:
                     raise
                 raise HTTPException(409, 'Knowledge availability changed; retry') from exc
-            if current['evidence'] != result['evidence']:
+            if current['evidence'] != result['evidence'] or current['retrieval_mode'] != result['retrieval_mode']:
                 raise HTTPException(409, 'Knowledge availability changed; retry')
             if candidate is not None:
-                result['kind'] = 'generated'
-                result['message'] = candidate['answer']
-                result['citations'] = candidate['citations']
+                if candidate['citations']:
+                    result['kind'] = 'generated'
+                    result['message'] = candidate['answer']
+                    result['citations'] = candidate['citations']
+                else:
+                    result['kind'] = 'insufficient_evidence'
+                    result['message'] = '现有资料不足以回答，请补充信息或联系负责人。'
+                    result['evidence'] = []
         question_logger.info(json.dumps({
             'timestamp':datetime.now(timezone.utc).isoformat(), 'component':'questions',
             'event':'guest_search_completed', 'request_id':request.state.request_id,

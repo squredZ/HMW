@@ -76,9 +76,11 @@ def _locator(locator: dict, line_no: int) -> dict | None:
 
 
 def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
-                  root: Path, max_source_bytes: int) -> dict:
+                  root: Path, max_source_bytes: int, *, include_context: bool = False) -> dict:
     terms = _terms(question)
     evidence = []
+    fallback = []
+    context_limited = False
     remaining = MAX_SEARCH_CHARS
     limited = False
     with Session(engine) as db:
@@ -96,9 +98,18 @@ def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
             if index >= MAX_DOCUMENTS or remaining <= 0:
                 limited = True
                 break
-            if not terms:
+            if not terms and not include_context:
                 continue
+            candidate = None
             for line_no, (text, consumed) in enumerate(_bounded_lines(version.content, remaining), 1):
+                if include_context and candidate is None and text.strip():
+                    position = _locator(version.locator, line_no)
+                    if position:
+                        if len(text) > 500:
+                            context_limited = True
+                        candidate = {'knowledge_id':version.id, 'source_id':source.id,
+                                     'filename':source.filename, 'source_sha256':source.sha256,
+                                     'locator':position, 'excerpt':text[:500], '_object_key':source.object_key}
                 scanned = text
                 remaining -= consumed
                 positions = [scanned.lower().find(term) for term in terms]
@@ -115,11 +126,20 @@ def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
                 if remaining <= 0:
                     limited = True
                     break
+            if candidate is not None:
+                if len(fallback) < MAX_EVIDENCE:
+                    fallback.append(candidate)
+                else:
+                    context_limited = True
             if len(evidence) >= MAX_EVIDENCE:
                 limited = True
                 break
         if not seen:
             raise HTTPException(404, 'Not found')
+    used_context = bool(include_context and not evidence and fallback)
+    if used_context:
+        evidence = fallback
+        limited = limited or context_limited
     # Filesystem I/O occurs outside the database session; retain only metadata.
     checked = [(item, _source_valid(root, item['_object_key'], item['source_sha256'], max_source_bytes))
                for item in evidence]
@@ -138,6 +158,8 @@ def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
     evidence = [item for item, intact in checked if item['knowledge_id'] in valid and intact]
     for item in evidence:
         item.pop('_object_key')
+    message = ('以下是有限的公开资料上下文，未必与问题相关。' if used_context else '以下是可能相关的原文，请结合上下文判断。') if evidence else '未找到可核对的匹配依据。'
     return {'kind':'extractive' if evidence else 'insufficient_evidence',
-            'message':'以下是可能相关的原文，请结合上下文判断。' if evidence else '未找到可核对的匹配依据。',
-            'evidence':evidence, 'search_limited':limited, 'unavailable_sources':unavailable}
+            'message':message,
+            'evidence':evidence, 'search_limited':limited, 'unavailable_sources':unavailable,
+            'retrieval_mode':'context' if used_context else 'keyword'}

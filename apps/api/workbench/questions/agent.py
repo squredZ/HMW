@@ -22,12 +22,12 @@ def validate_answer(value: object, count: int) -> dict:
     answer, citations = value['answer'], value['citations']
     if not isinstance(answer, str) or not answer.strip() or len(answer) > 4000:
         raise AgentError('invalid_response')
-    if not isinstance(citations, list) or not citations or len(citations) > count:
+    if not isinstance(citations, list) or len(citations) > count:
         raise AgentError('invalid_citations')
     if any(type(index) is not int or index < 1 or index > count for index in citations) or len(set(citations)) != len(citations):
         raise AgentError('invalid_citations')
     markers = [int(number) for number in re.findall(r'\[(\d+)\]', answer)]
-    if not markers or set(markers) != set(citations):
+    if set(markers) != set(citations):
         raise AgentError('invalid_citations')
     return {'answer':answer.strip(), 'citations':citations}
 
