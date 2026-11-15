@@ -1,8 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Install the checked-in backend and frontend dependency sets.
-set -euo pipefail
+set -eu
 
-project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+project_root="$(CDPATH= cd -P "$(dirname "$0")/.." && pwd -P)"
 
 missing=0
 for tool in uv node npm pnpm; do
@@ -11,7 +11,7 @@ for tool in uv node npm pnpm; do
     missing=1
   fi
 done
-if (( missing )); then
+if [ "$missing" -ne 0 ]; then
   printf '请先安装上述工具，然后重新运行此脚本。\n' >&2
   exit 1
 fi

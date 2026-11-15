@@ -24,7 +24,7 @@ MVP 不接入 EverOS。Pi 模型默认关闭；未来长期记忆可另行评估
 | Linux / macOS | `./scripts/setup.sh` |
 | Windows 命令提示符 | `scripts\setup.cmd` |
 
-脚本根据 `apps/api/uv.lock`、`apps/agent/package-lock.json` 和 `apps/web/pnpm-lock.yaml` 安装锁定依赖，可重复执行，不会启动服务或设置密码。
+Linux / macOS 也可以使用 `sh scripts/setup.sh`。脚本根据 `apps/api/uv.lock`、`apps/agent/package-lock.json` 和 `apps/web/pnpm-lock.yaml` 安装锁定依赖，可重复执行，不会启动服务或设置密码。
 
 ### 2. 创建配置
 
@@ -49,7 +49,7 @@ web_port = 5173
 | Linux / macOS | `./scripts/start.sh` |
 | Windows 命令提示符 | `scripts\start.cmd` |
 
-启动器依次启动 API、导入 Worker 和前端，等待 API 与前端就绪后显示访问地址。默认地址为 `http://127.0.0.1:5173`；按 `Ctrl+C` 停止。API 和 Worker 使用同一数据库 `apps/api/workbench-dev.db` 和文件目录 `apps/api/workbench-objects/`。
+Linux / macOS 也可以使用 `sh scripts/start.sh`；在 `scripts` 目录下可运行 `sh start.sh`。启动器依次启动 API、导入 Worker 和前端，等待 API 与前端就绪后显示访问地址。默认地址为 `http://127.0.0.1:5173`；按 `Ctrl+C` 停止。API 和 Worker 使用同一数据库 `apps/api/workbench-dev.db` 和文件目录 `apps/api/workbench-objects/`。
 
 服务仅监听本机 `127.0.0.1`。Windows 脚本及进程树清理尚未在 Windows 实机验证。重启 API 后需要重新登录负责人账号，已有临时访客会话也会失效。
 

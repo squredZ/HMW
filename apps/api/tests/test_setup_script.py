@@ -10,7 +10,8 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX shell wrapper")
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_setup_uses_locked_dependencies_from_any_directory(tmp_path):
+@pytest.mark.parametrize("shell", ["sh", "bash"])
+def test_setup_uses_locked_dependencies_from_any_directory(tmp_path, shell):
     bindir = tmp_path / 'bin'
     bindir.mkdir()
     calls = tmp_path / 'calls'
@@ -19,7 +20,7 @@ def test_setup_uses_locked_dependencies_from_any_directory(tmp_path):
         executable.write_text('#!/bin/sh\nprintf "%s\\n" "' + name + ' $*" >> "$HMW_TEST_CALLS"\n')
         executable.chmod(0o755)
     env = {**os.environ, 'PATH':f'{bindir}:/usr/bin:/bin', 'HMW_TEST_CALLS':str(calls)}
-    result = subprocess.run(['bash', str(ROOT / 'scripts' / 'setup.sh')], cwd=tmp_path,
+    result = subprocess.run([shell, str(ROOT / 'scripts' / 'setup.sh')], cwd=tmp_path,
                             env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     commands = calls.read_text().splitlines()

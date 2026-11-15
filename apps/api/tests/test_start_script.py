@@ -32,8 +32,9 @@ def test_start_configuration_validates_credentials_and_ports(tmp_path):
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX shell wrapper')
-def test_start_missing_config_has_clear_instruction(tmp_path):
-    result = subprocess.run([str(ROOT / 'scripts' / 'start.sh'), str(tmp_path / 'missing.toml')],
+@pytest.mark.parametrize('shell', ['sh', 'bash'])
+def test_start_missing_config_has_clear_instruction(tmp_path, shell):
+    result = subprocess.run([shell, 'start.sh', str(tmp_path / 'missing.toml')], cwd=ROOT / 'scripts',
                             capture_output=True, text=True)
     assert result.returncode != 0
     assert 'config.example.toml' in result.stderr
