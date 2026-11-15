@@ -1,10 +1,13 @@
 """Read-only, short-lived guest access to explicitly shared owner content."""
+import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import token_urlsafe
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
@@ -13,6 +16,16 @@ from workbench.knowledge.models import GuestPublication, KnowledgeVersion, Sourc
 from workbench.knowledge.source_access import verified_download
 from workbench.projects.models import Project
 from workbench.sessions import SessionStore
+from workbench.questions.retrieval import guest_extract
+
+
+question_logger = logging.getLogger('workbench.questions')
+
+
+class GuestQuestion(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    project_id: str = Field(min_length=1, max_length=64)
+    question: str = Field(min_length=2, max_length=240)
 
 
 def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str] | None,
@@ -47,6 +60,19 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
         response.set_cookie('hmw_guest', token, httponly=True, samesite='strict')
         response.headers['Cache-Control'] = 'no-store'
         return {'kind':'guest'}
+
+    @app.post('/api/guest/questions')
+    def ask_question(payload: GuestQuestion, request: Request):
+        require_guest(request)
+        result = guest_extract(engine, owner_id, payload.project_id, payload.question, object_root, max_file_bytes)
+        question_logger.info(json.dumps({
+            'timestamp':datetime.now(timezone.utc).isoformat(), 'component':'questions',
+            'event':'guest_search_completed', 'request_id':request.state.request_id,
+            'project_id':payload.project_id, 'result':result['kind'],
+            'evidence_count':len(result['evidence']), 'search_limited':result['search_limited'],
+            'unavailable_sources':result['unavailable_sources'],
+        }, ensure_ascii=False))
+        return result
 
     @app.get('/api/guest/status')
     def guest_status(request: Request):
