@@ -224,8 +224,8 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
             row = db.scalar(select(Status).where(Status.owner == owner_id))
             if row is None:
                 raise HTTPException(404, "Not found")
-            published = db.scalar(select(StatusVersion).where(StatusVersion.status_id == row.id, StatusVersion.state == "published").order_by(StatusVersion.version.desc()).limit(1))
-            if published is None:
+            published = db.scalar(select(StatusVersion).where(StatusVersion.status_id == row.id, StatusVersion.state.in_(["published", "withdrawn"])).order_by(StatusVersion.version.desc()).limit(1))
+            if published is None or published.state == "withdrawn":
                 raise HTTPException(404, "Not found")
             owner_projects = set(db.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == owner_id)).all())
             viewer_projects = set(db.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == user)).all())
@@ -280,11 +280,36 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
                 raise HTTPException(404, "Not found")
             if row.version != payload.expected_version:
                 raise HTTPException(409, "Version conflict")
+            if row.state != "draft":
+                raise HTTPException(409, "Only a draft can be published")
             row.version += 1
             row.state = "published"
             row.updated_at = datetime.now(timezone.utc)
             record(db, row)
             record_audit(db, actor_id=user, action="personal.published", resource_id=row.id,
+                         resource_version=row.version, request_id=request.state.request_id)
+            return snapshot(row)
+
+    @app.post("/api/personal/status/{status_id}/withdraw")
+    def withdraw_status(status_id: str, payload: PublishInput, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        with Session(engine) as db, db.begin():
+            row = db.scalar(select(Status).where(Status.id == status_id).with_for_update())
+            if not row or row.owner != user:
+                raise HTTPException(404, "Not found")
+            if row.version != payload.expected_version:
+                raise HTTPException(409, "Version conflict")
+            latest = db.scalar(select(StatusVersion).where(
+                StatusVersion.status_id == row.id,
+                StatusVersion.state.in_(["published", "withdrawn"]),
+            ).order_by(StatusVersion.version.desc()).limit(1))
+            if latest is None or latest.state == "withdrawn":
+                raise HTTPException(409, "No published status to withdraw")
+            row.version += 1
+            row.state = "withdrawn"
+            row.updated_at = datetime.now(timezone.utc)
+            record(db, row)
+            record_audit(db, actor_id=user, action="personal.withdrawn", resource_id=row.id,
                          resource_version=row.version, request_id=request.state.request_id)
             return snapshot(row)
 

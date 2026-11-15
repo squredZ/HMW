@@ -1,6 +1,6 @@
 # HMW 工作台
 
-本仓库依据 `docs/workbench-requirements-design-v0.1.md` 和 `docs/workbench-implementation-plan-v0.1.md` 开发。当前只有本地开发用的个人状态初始切片：本地账号登录、项目成员权限、手动保存与发布个人状态、按项目共享和每周投入记录。
+本仓库依据 `docs/workbench-requirements-design-v0.1.md` 和 `docs/workbench-implementation-plan-v0.1.md` 开发。当前只有本地开发用的个人状态初始切片：本地账号登录、项目成员权限、手动保存、发布和撤回个人状态、按项目共享和每周投入记录。
 
 **尚不可试点或用于真实数据。** 尚未实现正式身份认证、正式项目身份与授权管理、审计查询与保留策略、投入统计图表、知识管理、问答、问题、Worker、任务和审批。SQLite 开发数据不等于计划要求的 PostgreSQL 生产方案，并发和故障恢复尚未验证。
 

@@ -129,3 +129,22 @@ it('opens a colleague published status in read-only mode', async () => {
   await screen.findByText('公开进度')
   expect(fetcher.mock.calls[3][0]).toBe('/api/personal/status/owner')
 })
+
+it('allows the owner to withdraw a published status', async () => {
+  const published = {id:'s1',version:2,state:'published',focus:'进行中',progress:null,allocations:[],audience_project_ids:[]}
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({csrf_token:'token'}),{status:200}))
+    .mockResolvedValueOnce(new Response(JSON.stringify(published),{status:200}))
+    .mockResolvedValueOnce(new Response('[]',{status:200}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({...published,version:3,state:'withdrawn'}),{status:200}))
+  vi.stubGlobal('fetch', fetcher)
+  render(<App />)
+  fireEvent.change(screen.getByLabelText('账号'),{target:{value:'owner'}})
+  fireEvent.change(screen.getByLabelText('密码'),{target:{value:'password'}})
+  fireEvent.click(screen.getByRole('button',{name:'登录'}))
+  await screen.findByLabelText('当前重点')
+  fireEvent.click(screen.getByRole('button',{name:'撤回已发布状态'}))
+  await screen.findByText('已撤回')
+  expect(fetcher.mock.calls[3][0]).toBe('/api/personal/status/s1/withdraw')
+  expect(JSON.parse(fetcher.mock.calls[3][1].body)).toEqual({expected_version:2})
+})
