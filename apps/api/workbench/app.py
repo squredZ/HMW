@@ -3,24 +3,23 @@
 The header-based identity provider exists exclusively in explicit test mode.
 Production requests are rejected until an approved identity provider is configured.
 """
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timedelta, timezone
 from secrets import compare_digest, token_urlsafe
-from uuid import uuid4
 from typing import Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import JSON, DateTime, Integer, String, create_engine, select
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Mapped, Session, mapped_column
 from sqlalchemy.orm.exc import StaleDataError
+
+from workbench.audit import record_audit
+from workbench.db import Base
 from workbench.request_logging import install_request_logging
 from workbench.sessions import SessionStore
-from sqlalchemy.exc import IntegrityError
-
-
-class Base(DeclarativeBase):
-    pass
 
 
 class Project(Base):
@@ -169,6 +168,8 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
             project = Project(id=str(uuid4()), name=payload.name, owner=user)
             db.add(project)
             db.add(ProjectMember(project_id=project.id, user_id=user, role="owner"))
+            record_audit(db, actor_id=user, action="project.created", resource_id=project.id,
+                         request_id=request.state.request_id)
             return {"id": project.id, "name": project.name, "role": "owner"}
 
     @app.put("/api/projects/{project_id}/members/{member_id}")
@@ -181,11 +182,15 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
             if project.owner != user or member_id == project.owner:
                 raise HTTPException(403, "Forbidden")
             member = db.get(ProjectMember, (project_id, member_id))
+            previous_role = member.role if member else None
             if member is None:
                 member = ProjectMember(project_id=project_id, user_id=member_id, role=payload.role)
                 db.add(member)
             else:
                 member.role = payload.role
+            record_audit(db, actor_id=user, action="project.member.set", resource_id=project_id,
+                         request_id=request.state.request_id,
+                         details={"member_id": member_id, "old_role": previous_role, "new_role": payload.role})
             return {"user_id": member_id, "role": member.role}
 
     @app.delete("/api/projects/{project_id}/members/{member_id}", status_code=204)
@@ -200,6 +205,9 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
             member = db.get(ProjectMember, (project_id, member_id))
             if member is None:
                 raise HTTPException(404, "Not found")
+            record_audit(db, actor_id=user, action="project.member.removed", resource_id=project_id,
+                         request_id=request.state.request_id,
+                         details={"member_id": member_id, "old_role": member.role})
             db.delete(member)
 
     @app.get("/api/personal/status")
@@ -259,6 +267,8 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
             row.body = payload.model_dump(mode="json", exclude={"expected_version"})
             row.updated_at = datetime.now(timezone.utc)
             record(db, row)
+            record_audit(db, actor_id=user, action="personal.draft.saved", resource_id=row.id,
+                         resource_version=row.version, request_id=request.state.request_id)
             return snapshot(row)
 
     @app.post("/api/personal/status/{status_id}/publish")
@@ -274,6 +284,8 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
             row.state = "published"
             row.updated_at = datetime.now(timezone.utc)
             record(db, row)
+            record_audit(db, actor_id=user, action="personal.published", resource_id=row.id,
+                         resource_version=row.version, request_id=request.state.request_id)
             return snapshot(row)
 
     return app

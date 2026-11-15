@@ -1,3 +1,4 @@
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -29,6 +30,8 @@ def test_simultaneous_edits_do_not_overwrite_each_other(tmp_path, monkeypatch):
         stored = client.get('/api/personal/status', headers=headers).json()
         assert stored['version'] == initial['version'] + 1
         assert stored['focus'] in ('first', 'second')
+    with sqlite3.connect(tmp_path / 'concurrent.db') as db:
+        assert db.execute("select count(*) from audit_events where action='personal.draft.saved'").fetchone()[0] == 2
 
 
 def test_simultaneous_first_save_returns_conflict(tmp_path, monkeypatch):
