@@ -105,3 +105,38 @@ def test_readiness_ignores_http_proxy(monkeypatch):
     monkeypatch.setattr(launcher, 'build_opener', opener)
     launcher.wait_ready('API', 'http://127.0.0.1:18000/', Child())
     assert observed[0][0] == 'http://127.0.0.1:18000/'
+
+
+def test_invalid_toml_reports_location_without_exposing_secrets(tmp_path):
+    launcher = load_launcher()
+    path = tmp_path / 'bad.toml'
+    path.write_text('[owner]\npassword = secret-value\n')
+    with pytest.raises(ValueError) as error:
+        launcher.read_config(path)
+    assert '第 2 行' in str(error.value)
+    assert '列' in str(error.value)
+    assert 'secret-value' not in str(error.value)
+
+
+def test_llm_enabled_must_be_boolean_before_launch(tmp_path):
+    launcher = load_launcher()
+    path = tmp_path / 'config.toml'
+    path.write_text('[owner]\nusername="owner"\npassword="secret"\n[llm]\nenabled="true"\n')
+    with pytest.raises(ValueError, match='llm.enabled'):
+        launcher.read_config(path)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX SO_REUSEADDR semantics')
+def test_port_check_allows_closed_connections_in_time_wait():
+    import socket
+    launcher = load_launcher()
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        client = socket.create_connection(('127.0.0.1', port))
+        server, _ = listener.accept()
+        server.close()
+        client.close()
+    launcher.check_ports([port])

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -25,7 +26,13 @@ def read_config(path: Path) -> dict:
     except FileNotFoundError as exc:
         raise ValueError('配置文件不存在；请复制 config.example.toml 为 .hmw.toml 并填写账号密码。') from exc
     except tomllib.TOMLDecodeError as exc:
-        raise ValueError('配置文件格式无效，请检查 TOML 语法。') from exc
+        # Use only numeric location information; parser text may contain private values.
+        location = re.search(r'\(at line (\d+), column (\d+)\)', str(exc))
+        detail = f'（第 {location.group(1)} 行，第 {location.group(2)} 列）' if location else ''
+        raise ValueError(f'配置文件格式无效{detail}，请检查 TOML 语法。') from exc
+    llm = config.get('llm', {})
+    if not isinstance(llm, dict) or type(llm.get('enabled', False)) is not bool:
+        raise ValueError('llm.enabled 必须是布尔值 true 或 false，不要加引号。')
     owner = config.get('owner')
     if not isinstance(owner, dict) or any(not isinstance(owner.get(key), str) or not owner[key].strip() for key in ('username', 'password')):
         raise ValueError('请设置非空的 owner.username 和 owner.password。')
@@ -69,6 +76,8 @@ def stop_children(children: list[tuple[str, subprocess.Popen]]) -> None:
 def check_ports(ports: list[int]) -> None:
     for port in ports:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if os.name != 'nt':
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 probe.bind(('127.0.0.1', port))
             except OSError as exc:
