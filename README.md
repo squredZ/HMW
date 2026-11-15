@@ -21,7 +21,7 @@ pnpm --dir apps/web install
 cd apps/api
 export HMW_DEV_USERNAME=owner
 export HMW_DEV_PASSWORD='替换为本地临时密码'
-.venv/bin/uvicorn workbench.dev:app --host 127.0.0.1 --port 8000
+.venv/bin/uvicorn workbench.dev:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
 要演示两个本地账号，可以在启动 API 前使用 `HMW_DEV_USERS_JSON` 配置账号映射，并取消设置单账号变量。例如：
@@ -50,3 +50,5 @@ pnpm --dir apps/web build
 ```
 
 API 测试使用 SQLite 和显式测试身份，不代替 PostgreSQL、并发控制、真实身份、浏览器端到端或安全测试。本地账号仅供开发，成员管理不等于正式用户管理。
+
+API 请求诊断以 JSON 记录路由模板、响应状态、耗时及请求 ID，不记录正文、查询参数或会话凭据；本地启动关闭 Uvicorn 原始访问日志以免记录查询参数。个人状态并发测试当前使用 SQLite，尚未覆盖 PostgreSQL 或多进程部署。

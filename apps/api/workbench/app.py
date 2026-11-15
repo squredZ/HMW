@@ -9,9 +9,14 @@ from uuid import uuid4
 from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import JSON, DateTime, Integer, String, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.orm.exc import StaleDataError
+from workbench.request_logging import install_request_logging
+from workbench.sessions import SessionStore
+from sqlalchemy.exc import IntegrityError
 
 
 class Base(DeclarativeBase):
@@ -50,6 +55,9 @@ class Status(Base):
     state: Mapped[str] = mapped_column(String, nullable=False)
     body: Mapped[dict] = mapped_column(JSON, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # The version participates in UPDATE predicates even on SQLite, where
+    # SELECT FOR UPDATE does not lock rows. The service increments it.
+    __mapper_args__ = {"version_id_col": version, "version_id_generator": False}
 
 
 class StatusVersion(Base):
@@ -101,10 +109,15 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
     engine = create_engine(database_url, connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {})
     Base.metadata.create_all(engine)
     app = FastAPI(title="Workbench API")
-    sessions: dict[str, tuple[str, str, datetime]] = {}
+    install_request_logging(app)
+    sessions = SessionStore()
+
+    @app.exception_handler(StaleDataError)
+    def handle_stale_write(request: Request, exc: StaleDataError):
+        return JSONResponse(status_code=409, content={"detail": "Version conflict"})
 
     def actor(request: Request, user: str | None, principal: str | None, csrf: str | None, write: bool = False) -> str:
-        session = sessions.get(request.cookies.get("hmw_session", ""))
+        session = sessions.get(request.cookies.get("hmw_session", ""), datetime.now(timezone.utc))
         if session and session[2] > datetime.now(timezone.utc):
             if write and (csrf is None or not compare_digest(csrf, session[1])):
                 raise HTTPException(403, "CSRF validation failed")
@@ -131,14 +144,15 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
         if expected is None or not compare_digest(expected, payload.password):
             raise HTTPException(401, "Invalid credentials")
         token, csrf = token_urlsafe(32), token_urlsafe(32)
-        sessions[token] = (payload.username, csrf, datetime.now(timezone.utc) + timedelta(hours=8))
+        now = datetime.now(timezone.utc)
+        sessions.add(token, payload.username, csrf, now + timedelta(hours=8), now)
         response.set_cookie("hmw_session", token, httponly=True, samesite="strict", max_age=8 * 3600)
         return {"csrf_token": csrf}
 
     @app.delete("/api/dev/session", status_code=204)
     def logout(request: Request, response: Response, x_csrf_token: str | None = Header(default=None)):
         actor(request, None, None, x_csrf_token, True)
-        sessions.pop(request.cookies.get("hmw_session", ""), None)
+        sessions.remove(request.cookies.get("hmw_session", ""))
         response.delete_cookie("hmw_session")
 
     @app.get("/api/projects")
@@ -231,6 +245,15 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
                     raise HTTPException(409, "Version conflict")
                 row = Status(id=str(uuid4()), owner=user, version=0, state="draft", body={}, updated_at=datetime.now(timezone.utc))
                 db.add(row)
+                try:
+                    db.flush()
+                except IntegrityError as exc:
+                    # Only translate the owner uniqueness race; unrelated database
+                    # errors must remain failures rather than false conflicts.
+                    constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+                    if constraint == "personal_status_owner_key" or "UNIQUE constraint failed: personal_status.owner" in str(exc.orig):
+                        raise HTTPException(409, "Version conflict") from exc
+                    raise
             row.version += 1
             row.state = "draft"
             row.body = payload.model_dump(mode="json", exclude={"expected_version"})
