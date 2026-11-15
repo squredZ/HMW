@@ -228,3 +228,133 @@ def test_worker_logs_job_result_without_file_content(tmp_path, caplog):
     assert job in caplog.text
     assert 'completed' in caplog.text
     assert 'private content' not in caplog.text
+
+
+def test_slow_import_renews_lease_while_reading(tmp_path):
+    from datetime import timedelta
+    root = tmp_path / 'objects'
+    app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", testing=True, storage_root=root)
+    with TestClient(app) as client:
+        pid = client.post('/api/projects', headers=h('owner'), json={'name':'A'}).json()['id']
+        job = client.post(f'/api/projects/{pid}/imports', headers=h('owner'), files=[('files',('a.txt',b'0123456789','text/plain'))]).json()['jobs'][0]
+        clock_now = datetime.now(timezone.utc)
+        def clock():
+            nonlocal clock_now
+            clock_now += timedelta(seconds=16)
+            return clock_now
+        assert process_one(app.state.engine, root, 'worker', now=clock_now, clock=clock, chunk_bytes=2)
+        result = client.get(f'/api/imports/{job}', headers=h('owner')).json()
+        assert result['state'] == 'completed'
+
+
+def test_worker_losing_lease_during_read_cannot_publish_result(tmp_path):
+    from datetime import timedelta
+    root = tmp_path / 'objects'
+    app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", testing=True, storage_root=root)
+    with TestClient(app) as client:
+        pid = client.post('/api/projects', headers=h('owner'), json={'name':'A'}).json()['id']
+        job = client.post(f'/api/projects/{pid}/imports', headers=h('owner'), files=[('files',('a.txt',b'content','text/plain'))]).json()['jobs'][0]
+        now = datetime.now(timezone.utc)
+        assert process_one(app.state.engine, root, 'slow-worker', now=now, clock=lambda: now + timedelta(seconds=61), chunk_bytes=2)
+        assert client.get(f'/api/imports/{job}', headers=h('owner')).json()['state'] == 'running'
+        assert process_one(app.state.engine, root, 'recovery-worker', now=now + timedelta(seconds=61), clock=lambda: now + timedelta(seconds=61))
+        result = client.get(f'/api/imports/{job}', headers=h('owner')).json()
+        assert result['state'] == 'completed'
+
+
+def test_streaming_upload_stops_reading_when_request_budget_is_exceeded(tmp_path):
+    import asyncio
+    import httpx
+
+    app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", testing=True,
+                     storage_root=tmp_path / 'objects', max_file_bytes=4, max_batch_files=1)
+    with TestClient(app) as client:
+        pid = client.post('/api/projects', headers=h('owner'), json={'name':'A'}).json()['id']
+    consumed = []
+
+    class Upload(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'--X\r\nContent-Disposition: form-data; name="files"; filename="a.txt"\r\nContent-Type: text/plain\r\n\r\n'
+            for index in range(10):
+                consumed.append(index)
+                yield b'a' * (512 * 1024)
+            yield b'\r\n--X--\r\n'
+
+    async def send():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            return await client.post(f'/api/projects/{pid}/imports', headers={**h('owner'), 'Content-Type':'multipart/form-data; boundary=X'}, content=Upload())
+    response = asyncio.run(send())
+    assert response.status_code == 413
+    assert len(consumed) < 10
+    assert not (tmp_path / 'objects').exists()
+
+
+def test_import_history_is_project_scoped_and_available_after_restart(tmp_path):
+    database = f"sqlite:///{tmp_path / 'db.sqlite'}"
+    root = tmp_path / 'objects'
+    app = create_app(database, testing=True, storage_root=root)
+    with TestClient(app) as client:
+        a = client.post('/api/projects', headers=h('owner'), json={'name':'A'}).json()['id']
+        b = client.post('/api/projects', headers=h('owner'), json={'name':'B'}).json()['id']
+        client.put(f'/api/projects/{a}/members/member', headers=h('owner'), json={'role':'member'})
+        a_job = client.post(f'/api/projects/{a}/imports', headers=h('owner'), files=[('files',('a.txt',b'a','text/plain'))]).json()['jobs'][0]
+        b_job = client.post(f'/api/projects/{b}/imports', headers=h('owner'), files=[('files',('b.txt',b'b','text/plain'))]).json()['jobs'][0]
+    reopened = create_app(database, testing=True, storage_root=root)
+    with TestClient(reopened) as client:
+        items = client.get(f'/api/projects/{a}/imports', headers=h('owner')).json()['jobs']
+        assert [item['id'] for item in items] == [a_job]
+        assert b_job not in str(items)
+        assert client.get(f'/api/projects/{a}/imports', headers=h('member')).status_code == 404
+        assert client.get(f'/api/projects/{a}/imports', headers=h('stranger')).status_code == 404
+
+
+def test_stream_limit_closes_multipart_temporary_files(tmp_path, monkeypatch):
+    import asyncio
+    import httpx
+    import starlette.formparsers
+
+    app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", testing=True,
+                     storage_root=tmp_path / 'objects', max_file_bytes=4, max_batch_files=1)
+    with TestClient(app) as client:
+        pid = client.post('/api/projects', headers=h('owner'), json={'name':'A'}).json()['id']
+    created = []
+    factory = starlette.formparsers.SpooledTemporaryFile
+    def tracked_file(*args, **kwargs):
+        file = factory(*args, **kwargs)
+        created.append(file)
+        return file
+    monkeypatch.setattr(starlette.formparsers, 'SpooledTemporaryFile', tracked_file)
+
+    class Upload(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'--X\r\nContent-Disposition: form-data; name="files"; filename="a.txt"\r\nContent-Type: text/plain\r\n\r\n'
+            for _ in range(5):
+                yield b'a' * (512 * 1024)
+            yield b'\r\n--X--\r\n'
+
+    async def send():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            return await client.post(f'/api/projects/{pid}/imports', headers={**h('owner'), 'Content-Type':'multipart/form-data; boundary=X'}, content=Upload())
+    assert asyncio.run(send()).status_code == 413
+    assert created and all(file.closed for file in created)
+
+
+def test_non_multipart_upload_is_rejected_without_reading_body(tmp_path):
+    import asyncio
+    import httpx
+    app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", testing=True,
+                     storage_root=tmp_path / 'objects', max_file_bytes=4, max_batch_files=1)
+    with TestClient(app) as client:
+        pid = client.post('/api/projects', headers=h('owner'), json={'name':'A'}).json()['id']
+    consumed = []
+    class Upload(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for index in range(10):
+                consumed.append(index)
+                yield b'x' * (512 * 1024)
+    async def send():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            return await client.post(f'/api/projects/{pid}/imports', headers={**h('owner'), 'Content-Type':'application/octet-stream'}, content=Upload())
+    response = asyncio.run(send())
+    assert response.status_code == 422
+    assert consumed == []

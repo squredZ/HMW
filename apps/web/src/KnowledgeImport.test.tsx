@@ -45,3 +45,17 @@ it('recovers the submitted job after refreshing the page', async () => {
   fireEvent.click(screen.getByRole('button',{name:'刷新任务'}))
   await screen.findByText('无法识别文件编码，请转换为 UTF-8 后重新上传。')
 })
+
+it('loads a previous import from the server in a new tab', async () => {
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({jobs:[{id:'past',state:'completed',filename:'历史.txt',created_at:'2026-11-15T00:00:00Z'}]}),{status:200}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({state:'completed',result:{knowledge_id:'k1'}}),{status:200}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({id:'k1',state:'draft',content:'历史内容',locator:{start_line:1,end_line:1},source:{id:'s1',filename:'历史.txt'}}),{status:200}))
+  vi.stubGlobal('fetch', fetcher)
+  render(<KnowledgeImport csrf="token" projects={[{id:'p1',name:'项目一',role:'owner'}]} />)
+  fireEvent.change(screen.getByLabelText('导入项目'),{target:{value:'p1'}})
+  fireEvent.click(screen.getByRole('button',{name:'加载导入记录'}))
+  await screen.findByText(/历史.txt/)
+  fireEvent.click(screen.getByRole('button',{name:'查看任务'}))
+  await screen.findByText('历史内容')
+})

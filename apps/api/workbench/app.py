@@ -24,6 +24,7 @@ from workbench.request_logging import install_request_logging
 from workbench.projects.models import Project, ProjectMember
 from workbench.sessions import SessionStore
 from workbench.knowledge.routes import install_knowledge_routes
+from workbench.knowledge.upload_limit import UploadLimitMiddleware
 
 
 class ProjectInput(BaseModel):
@@ -103,22 +104,7 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
     app.state.engine = engine
     object_root = Path(storage_root or os.environ.get("HMW_STORAGE_ROOT", "./workbench-objects"))
 
-    @app.middleware("http")
-    async def reject_oversized_upload(request: Request, call_next):
-        path = request.url.path
-        if request.method == "POST" and path.startswith("/api/projects/") and path.endswith("/imports"):
-            declared = request.headers.get("content-length")
-            if declared is not None:
-                try:
-                    size = int(declared)
-                except ValueError:
-                    return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length"})
-                if size < 0:
-                    return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length"})
-                if size > max_file_bytes * max_batch_files + 1024 * 1024:
-                    return JSONResponse(status_code=413, content={"detail": "Upload exceeds request limit"})
-        return await call_next(request)
-
+    app.add_middleware(UploadLimitMiddleware, max_body_bytes=max_file_bytes * max_batch_files + 1024 * 1024)
     install_request_logging(app)
     sessions = SessionStore()
 

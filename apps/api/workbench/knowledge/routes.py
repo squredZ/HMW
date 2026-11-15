@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Header, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, update
 from sqlalchemy.engine import Engine
@@ -79,6 +79,22 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
             if not committed:
                 for path in paths:
                     path.unlink(missing_ok=True)
+
+    @app.get("/api/projects/{project_id}/imports")
+    def list_imports(project_id: str, request: Request, limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0, le=10000), x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, None)
+        with Session(engine) as db:
+            project_access(db, project_id, user, maintain=True)
+            rows = db.execute(
+                select(Job, SourceVersion.filename)
+                .join(SourceVersion, Job.payload["source_id"].as_string() == SourceVersion.id)
+                .where(Job.kind == "import_text", SourceVersion.project_id == project_id,
+                       Job.payload["project_id"].as_string() == project_id)
+                .order_by(Job.created_at.desc(), Job.id.desc()).offset(offset).limit(limit)
+            ).all()
+            return {"jobs": [{"id":job.id, "state":job.state, "filename":filename,
+                              "created_at":datetime.fromtimestamp(job.created_at, timezone.utc).isoformat()}
+                             for job, filename in rows]}
 
     @app.get("/api/imports/{job_id}")
     def get_import(job_id: str, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None)):
