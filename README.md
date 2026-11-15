@@ -23,29 +23,21 @@ uv sync --locked --project apps/api
 pnpm --dir apps/web install --frozen-lockfile
 ```
 
-在第一个终端启动 API，替换下面的临时密码：
+Windows 用户可在命令提示符中运行 `scripts\setup.cmd`，安装同样的锁定依赖。
+
+将仓库根目录的 `config.example.toml` 复制为 `.hmw.toml`，填写 `[owner]` 的账号与密码。该文件已加入 `.gitignore`；不要把包含密码或 API key 的文件提交到版本库。`[server]` 可设置 API 和前端的本地端口。`[llm]` 中的 API key、模型、思考强度和 API URL 仅预留，目前不会被应用读取或调用。
+
+启动整个本地工作台：
 
 ```sh
-cd apps/api
-export HMW_DEV_USERNAME=owner
-export HMW_DEV_PASSWORD='替换为本地临时密码'
-.venv/bin/uvicorn workbench.dev:app --host 127.0.0.1 --port 8000 --no-access-log
+./scripts/start.sh
 ```
 
-工作台默认进入临时访客视图；你可点击“负责人登录”进入管理界面。访客不创建账号。任何能访问工作台链接的人，都可以查看负责人明确选择向访客公开的已发布内容；已有资料默认不公开。
+Windows 命令提示符中运行 `scripts\start.cmd`。启动器会启动 API、导入 Worker 和前端，等待 API 与前端就绪，并输出访问地址；按 Ctrl+C 可停止由它启动的进程。也可以给启动脚本传入自定义 TOML 文件路径；自定义路径需要自行确保不会被提交。三项服务共享 `apps/api/workbench-dev.db` 和 `apps/api/workbench-objects/`。
 
-在第二个终端启动界面：
+这些脚本仅用于本地开发，服务绑定 `127.0.0.1`，不构成面向外网的生产部署。工作台默认进入临时访客视图；你可点击“负责人登录”进入管理界面。访客不创建账号。任何能访问工作台链接的人，都可以查看负责人明确选择向访客公开的已发布内容；已有资料默认不公开。
 
-```sh
-pnpm --dir apps/web dev
-```
-
-在第三个终端启动文本导入 Worker（必须和 API 使用同一数据库与文件存储位置）：
-
-```sh
-cd apps/api
-.venv/bin/python -m workbench.jobs.worker
-```
+如需分别启动服务，请在 `apps/api` 设置 `HMW_DEV_USERNAME` 和 `HMW_DEV_PASSWORD` 后运行 `.venv/bin/uvicorn workbench.dev:app --host 127.0.0.1 --port 8000 --no-access-log`；在同一目录启动 `.venv/bin/python -m workbench.jobs.worker`；在仓库根目录运行 `pnpm --dir apps/web dev`。API 和 Worker 必须使用相同的数据库及文件存储位置。
 
 可在页面选择项目并上传单个 UTF-8 Markdown/TXT、DOCX 或 PPTX，也可展开“手动输入文字”，填写标题和内容导入文本。两种方式均需 Worker 处理，然后预览草稿并发布；提交后页面会自动刷新约一分钟，之后可手动刷新。任务显示等待领取时，请检查 Worker 是否启动，以及 API 与 Worker 是否使用相同的数据库和文件存储。DOC/PPT 旧格式暂不支持转换，请先转成 DOCX/PPTX 后重传。文件默认保存在 `apps/api/workbench-objects/`，此目录已被 Git 忽略；后台通过数据库租约领取任务。页面可按项目加载最近 50 条导入记录；Word 的未解决修订会阻止导入，批注需人工核对；PowerPoint 备注不进入正文，图片保留在原文件中并提示人工核对。负责人登录后可在“知识管理”中按项目、状态和文件名浏览知识，查看正文及原文件，发布草稿、调整访客可见性或停用已发布知识。停用会取消访客访问，保留正文、原件和审计记录。当前不支持其他编码的直接导入、草稿编辑、知识分类或重试界面。
 

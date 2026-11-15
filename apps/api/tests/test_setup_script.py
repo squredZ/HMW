@@ -2,6 +2,10 @@ from pathlib import Path
 import os
 import subprocess
 
+import pytest
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX shell wrapper")
+
 
 ROOT = Path(__file__).resolve().parents[3]
 
