@@ -19,6 +19,7 @@ from workbench.knowledge.source_access import verified_download
 from workbench.projects.models import Project, ProjectMember
 from workbench.sessions import SessionStore
 from workbench.questions.retrieval import guest_extract
+from workbench.questions.agent import AgentError, validate_answer
 
 
 question_logger = logging.getLogger('workbench.questions')
@@ -99,6 +100,28 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
     def ask_question(payload: GuestQuestion, request: Request):
         require_guest(request)
         result = guest_extract(engine, owner_id, payload.project_id, payload.question, object_root, max_file_bytes)
+        agent = getattr(app.state, 'answer_agent', None)
+        if agent is not None and result['evidence']:
+            candidate = None
+            try:
+                candidate = validate_answer(agent.answer(payload.question, result['evidence']), len(result['evidence']))
+            except AgentError as exc:
+                question_logger.warning('agent_answer_failed request_id=%s reason=%s', request.state.request_id, exc.reason)
+                result['agent_unavailable'] = True
+            # Both generated and fallback results must respect changes during the model call.
+            require_guest(request)
+            try:
+                current = guest_extract(engine, owner_id, payload.project_id, payload.question, object_root, max_file_bytes)
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                raise HTTPException(409, 'Knowledge availability changed; retry') from exc
+            if current['evidence'] != result['evidence']:
+                raise HTTPException(409, 'Knowledge availability changed; retry')
+            if candidate is not None:
+                result['kind'] = 'generated'
+                result['message'] = candidate['answer']
+                result['citations'] = candidate['citations']
         question_logger.info(json.dumps({
             'timestamp':datetime.now(timezone.utc).isoformat(), 'component':'questions',
             'event':'guest_search_completed', 'request_id':request.state.request_id,

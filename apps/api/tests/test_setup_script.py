@@ -14,7 +14,7 @@ def test_setup_uses_locked_dependencies_from_any_directory(tmp_path):
     bindir = tmp_path / 'bin'
     bindir.mkdir()
     calls = tmp_path / 'calls'
-    for name in ('uv', 'pnpm', 'node'):
+    for name in ('uv', 'pnpm', 'node', 'npm'):
         executable = bindir / name
         executable.write_text('#!/bin/sh\nprintf "%s\\n" "' + name + ' $*" >> "$HMW_TEST_CALLS"\n')
         executable.chmod(0o755)
@@ -24,13 +24,14 @@ def test_setup_uses_locked_dependencies_from_any_directory(tmp_path):
     assert result.returncode == 0, result.stderr
     commands = calls.read_text().splitlines()
     assert f'uv sync --locked --project {ROOT / "apps/api"}' in commands
+    assert f'npm ci --prefix {ROOT / "apps/agent"} --ignore-scripts' in commands
     assert f'pnpm --dir {ROOT / "apps/web"} install --frozen-lockfile' in commands
 
 
 def test_setup_stops_when_dependency_install_fails(tmp_path):
     bindir = tmp_path / 'bin'
     bindir.mkdir()
-    for name in ('uv', 'pnpm', 'node'):
+    for name in ('uv', 'pnpm', 'node', 'npm'):
         executable = bindir / name
         executable.write_text('#!/bin/sh\n' + ('exit 42\n' if name == 'uv' else 'exit 0\n'))
         executable.chmod(0o755)

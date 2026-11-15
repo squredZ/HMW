@@ -39,3 +39,23 @@ it('informs visitors when a matching source cannot be verified', async () => {
   fireEvent.click(screen.getByRole('button',{name:'查找依据'}))
   await screen.findByText('部分来源暂时无法校验，已从结果中排除。')
 })
+
+it('labels generated answers and shows numbered source evidence', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({kind:'generated',message:'版本是 V2 [1]。',citations:[1],search_limited:false,evidence:[{knowledge_id:'k1',source_id:'s1',filename:'设计.md',locator:{start_line:2},excerpt:'版本是 V2。'}]}))))
+  render(<GuestQuestions projects={[{id:'p1',name:'项目一'}]} />)
+  fireEvent.change(screen.getByLabelText('问答项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('问题'),{target:{value:'接口版本'}})
+  fireEvent.click(screen.getByRole('button',{name:'查找依据'}))
+  await screen.findByText('版本是 V2 [1]。')
+  expect(screen.getByText('AI 生成，请核对来源。')).toBeTruthy()
+  expect(screen.getByText(/\[1\] 设计.md/)).toBeTruthy()
+})
+
+it('asks the visitor to retry when sources change during generation', async () => {
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(new Response('{}',{status:409})))
+  render(<GuestQuestions projects={[{id:'p1',name:'项目一'}]} />)
+  fireEvent.change(screen.getByLabelText('问答项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('问题'),{target:{value:'接口版本'}})
+  fireEvent.click(screen.getByRole('button',{name:'查找依据'}))
+  await screen.findByText('资料的可见范围或内容已发生变化，请重新提问。')
+})

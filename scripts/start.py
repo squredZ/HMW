@@ -90,7 +90,7 @@ def wait_ready(name: str, url: str, process: subprocess.Popen, timeout: float = 
     raise RuntimeError(f'{name} 未能在规定时间内启动，请检查端口和日志。')
 
 
-def run(config: dict) -> int:
+def run(config: dict, config_path: Path | None = None) -> int:
     node = shutil.which('node')
     vite = WEB_ROOT / 'node_modules' / 'vite' / 'bin' / 'vite.js'
     if node is None or not vite.is_file():
@@ -102,7 +102,10 @@ def run(config: dict) -> int:
         shared_env.pop(name, None)
     shared_env['HMW_DATABASE_URL'] = f"sqlite:///{(API_ROOT / 'workbench-dev.db').as_posix()}"
     shared_env['HMW_STORAGE_ROOT'] = str(API_ROOT / 'workbench-objects')
+    shared_env.pop('HMW_CONFIG_PATH', None)
     api_env = {**shared_env, 'HMW_DEV_USERNAME':owner['username'], 'HMW_DEV_PASSWORD':owner['password']}
+    if config_path is not None:
+        api_env['HMW_CONFIG_PATH'] = str(config_path.resolve())
     web_env = {**shared_env, 'HMW_API_PORT':str(server['api_port'])}
     commands = [
         ('API', [sys.executable, '-m', 'uvicorn', 'workbench.dev:app', '--host', '127.0.0.1', '--port', str(server['api_port']), '--no-access-log'], API_ROOT, api_env),
@@ -143,7 +146,7 @@ def run(config: dict) -> int:
 def main() -> int:
     try:
         path = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / '.hmw.toml'
-        return run(read_config(path))
+        return run(read_config(path), path)
     except (ValueError, OSError, RuntimeError) as exc:
         print(f'启动失败：{exc}', file=sys.stderr)
         return 1

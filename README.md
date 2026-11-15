@@ -4,11 +4,11 @@
 
 **尚不可试点或用于真实数据。** 尚未实现正式负责人身份认证、生产环境访客会话管理、审计查询与保留策略、投入统计图表、完整知识管理、生成式问答、完整问题管理、通用后台任务和审批。SQLite 开发数据不等于计划要求的 PostgreSQL 生产方案，并发和故障恢复尚未验证。
 
-MVP 计划使用 Pi 作为 Agent 运行时，本地知识检索先不接入 EverOS；未来长期记忆通过适配边界扩展。当前 Pi 也尚未完成产品集成。
+MVP 使用 Pi 作为只读问答 Agent，本地知识检索不接入 EverOS；未来长期记忆可通过适配边界扩展。模型默认关闭。
 
 ## 本地体验
 
-需要 Python 3.12+、uv、Node.js 和 pnpm。仅在自己的电脑上使用脱敏样例，开发账号和会话只为本地调试准备，不能暴露到网络。
+需要 Python 3.12+、uv、Node.js 22.19+、npm 和 pnpm。仅在自己的电脑上使用脱敏样例，开发账号和会话只为本地调试准备，不能暴露到网络。
 
 在仓库根目录一键安装后端和前端依赖：
 
@@ -16,16 +16,17 @@ MVP 计划使用 Pi 作为 Agent 运行时，本地知识检索先不接入 Ever
 ./scripts/setup.sh
 ```
 
-脚本需要预先安装 `uv`、Node.js 和 `pnpm`，会按 `apps/api/uv.lock` 和 `apps/web/pnpm-lock.yaml` 安装依赖；锁文件与声明不一致时会报错。脚本可重复执行，不会启动服务或设置密码。也可分别执行：
+脚本需要预先安装 `uv`、Node.js、npm 和 `pnpm`，会按 `apps/api/uv.lock`、`apps/agent/package-lock.json` 和 `apps/web/pnpm-lock.yaml` 安装依赖；锁文件与声明不一致时会报错。脚本可重复执行，不会启动服务或设置密码。也可分别执行：
 
 ```sh
 uv sync --locked --project apps/api
+npm ci --prefix apps/agent --ignore-scripts
 pnpm --dir apps/web install --frozen-lockfile
 ```
 
 Windows 用户可在命令提示符中运行 `scripts\setup.cmd`，安装同样的锁定依赖。
 
-将仓库根目录的 `config.example.toml` 复制为 `.hmw.toml`，填写 `[owner]` 的账号与密码。该文件已加入 `.gitignore`；不要把包含密码或 API key 的文件提交到版本库。`[server]` 可设置 API 和前端的本地端口。`[llm]` 中的 API key、模型、思考强度和 API URL 仅预留，目前不会被应用读取或调用。
+将仓库根目录的 `config.example.toml` 复制为 `.hmw.toml`，填写 `[owner]` 的账号与密码。该文件已加入 `.gitignore`；不要把包含密码或 API key 的文件提交到版本库。`[server]` 可设置 API 和前端的本地端口。`[llm]` 默认关闭；显式设置 `enabled = true` 并填写 DeepSeek 兼容 HTTPS API 的 `api_key`、`model`、`api_url`，可启用只读 Pi 回答。`reasoning_effort` 支持 `off`、`low`、`high`，具体模型的支持情况以服务商为准。
 
 启动整个本地工作台：
 
@@ -37,7 +38,7 @@ Windows 命令提示符中运行 `scripts\start.cmd`。启动器会启动 API、
 
 这些脚本仅用于本地开发，服务绑定 `127.0.0.1`，不构成面向外网的生产部署。工作台默认进入临时访客视图；你可点击“负责人登录”进入管理界面。访客不创建账号。任何能访问工作台链接的人，都可以查看负责人明确选择向访客公开的已发布内容；已有资料默认不公开。
 
-如需分别启动服务，请在 `apps/api` 设置 `HMW_DEV_USERNAME` 和 `HMW_DEV_PASSWORD` 后运行 `.venv/bin/uvicorn workbench.dev:app --host 127.0.0.1 --port 8000 --no-access-log`；在同一目录启动 `.venv/bin/python -m workbench.jobs.worker`；在仓库根目录运行 `pnpm --dir apps/web dev`。API 和 Worker 必须使用相同的数据库及文件存储位置。
+如需分别启动服务，请在 `apps/api` 设置 `HMW_DEV_USERNAME` 和 `HMW_DEV_PASSWORD` 后运行 `.venv/bin/uvicorn workbench.dev:app --host 127.0.0.1 --port 8000 --no-access-log`；如需模型，将 `HMW_CONFIG_PATH` 指向完整配置文件；在同一目录启动 `.venv/bin/python -m workbench.jobs.worker`；在仓库根目录运行 `pnpm --dir apps/web dev`。API 和 Worker 必须使用相同的数据库及文件存储位置。
 
 可在页面选择项目并上传单个 UTF-8 Markdown/TXT、DOCX 或 PPTX，也可展开“手动输入文字”，填写标题和内容导入文本。两种方式均需 Worker 处理，然后预览草稿并发布；提交后页面会自动刷新约一分钟，之后可手动刷新。任务显示等待领取时，请检查 Worker 是否启动，以及 API 与 Worker 是否使用相同的数据库和文件存储。DOC/PPT 旧格式暂不支持转换，请先转成 DOCX/PPTX 后重传。文件默认保存在 `apps/api/workbench-objects/`，此目录已被 Git 忽略；后台通过数据库租约领取任务。页面可按项目加载最近 50 条导入记录；Word 的未解决修订会阻止导入，批注需人工核对；PowerPoint 备注不进入正文，图片保留在原文件中并提示人工核对。负责人登录后可在“知识管理”中按项目、状态和文件名浏览知识，查看正文及原文件，发布草稿、调整访客可见性或停用已发布知识。停用会取消访客访问，保留正文、原件和审计记录。当前不支持其他编码的直接导入、草稿编辑、知识分类或重试界面。
 
@@ -47,6 +48,7 @@ Windows 命令提示符中运行 `scripts\start.cmd`。启动器会启动 API、
 
 ```sh
 uv run --project apps/api pytest
+node --test apps/agent/test/readonly.test.mjs
 pnpm --dir apps/web test
 pnpm --dir apps/web build
 ```
@@ -63,8 +65,10 @@ Worker 在分块读取时约每 15 秒续租；如果单次读取阻塞超过租
 
 Office 提取目前在 Worker 进程内执行，压缩包有展开预算，但尚未完成独立沙箱、页面原图预览、批注逐项处理、OCR 或实际组织数据评测；仅用于本地脱敏开发。
 
-访客可查看明确开放的已发布工作状态和知识、下载对应原件，并按项目关键词查找相关原文及来源。当前问答为有限范围的提取式检索，不调用模型或自动生成结论，也不保存问答历史；访客可对已有分享知识的项目登记问题，负责人可查看并手动标记已解决；完整问题状态流转、附件和后台任务尚未实现。
+访客可查看明确开放的已发布工作状态和知识、下载对应原件，并按项目关键词查找相关原文及来源。默认问答为有限范围的提取式检索；开启模型后 Pi 基于检索结果生成带引用的回答，不保存问答历史；访客可对已有分享知识的项目登记问题，负责人可查看并手动标记已解决；完整问题状态流转、附件和后台任务尚未实现。
 
 访客检索只使用当前明确开放且来源摘要校验通过的已发布知识；结果是可能相关的原文，需人工核对。为限制资源消耗，单次检索有文档数量和文本长度上限，达到上限时页面会提示。
 
 问题登记仅供本地开发：当前没有提交幂等键、频率限制、附件、访客进度查询或数据保留清理；请求失败后重试可能产生重复记录。提交和解决操作仅审计元数据，不记录问题正文。
+
+启用模型会把访客问题和检索命中的、访客有权查看的正文片段发送到配置的外部模型服务；请先确认数据和供应商处理环境适合该用途。Pi 不注册任何可执行工具，也不接收负责人密码或数据库配置，不能通过已提供的 Agent 工具修改知识；子进程仍以本机账号运行，尚未建立操作系统级只读沙箱。输出引用编号会校验，模型调用后会再次验证来源和访客可见性，但生成内容仍可能不准确，请核对原文。模型失败时降级展示可验证的原文。已经发往模型服务的数据无法在撤销共享后追回；未实现访问限流、跨进程并发限制和累计费用预算，仅供本地开发验证。

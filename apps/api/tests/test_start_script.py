@@ -63,12 +63,16 @@ def test_launcher_stops_children_when_a_service_exits(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher, 'wait_ready', lambda *args: None)
     monkeypatch.setattr(launcher, 'stop_children', lambda children: stopped.extend(children))
     config = {'owner':{'username':'owner','password':'test-password'}, 'server':{'api_port':8010,'web_port':5173}}
-    assert launcher.run(config) == 1
+    config_path = tmp_path / 'config.toml'
+    assert launcher.run(config, config_path) == 1
     assert len(stopped) == 3
     assert spawned[0][1]['env']['HMW_DEV_PASSWORD'] == 'test-password'
     assert 'HMW_DEV_PASSWORD' not in spawned[1][1]['env']
     assert 'HMW_DEV_PASSWORD' not in spawned[2][1]['env']
     assert spawned[2][1]['env']['HMW_API_PORT'] == '8010'
+    assert spawned[0][1]['env']['HMW_CONFIG_PATH'] == str(config_path.resolve())
+    assert 'HMW_CONFIG_PATH' not in spawned[1][1]['env']
+    assert 'HMW_CONFIG_PATH' not in spawned[2][1]['env']
 
 
 def test_launcher_refuses_occupied_ports():
