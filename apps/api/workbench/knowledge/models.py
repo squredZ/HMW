@@ -20,3 +20,9 @@ class KnowledgeVersion(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(String, nullable=False)
     locator: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class GuestPublication(Base):
+    """An explicit owner decision to share one published version with guests."""
+    __tablename__ = 'guest_publications'
+    version_id: Mapped[str] = mapped_column(String, primary_key=True)

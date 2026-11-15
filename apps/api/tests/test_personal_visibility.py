@@ -46,7 +46,7 @@ def test_revoked_membership_blocks_published_status(tmp_path):
 
 
 def test_two_development_sessions_share_only_authorized_status(tmp_path):
-    app = create_app(f"sqlite:///{tmp_path / 'test.db'}", dev_users={'owner':'owner-local', 'colleague':'colleague-local'})
+    app = create_app(f"sqlite:///{tmp_path / 'test.db'}", testing=True, dev_users={'owner':'owner-local', 'colleague':'colleague-local'})
     owner, colleague = TestClient(app), TestClient(app)
     owner_token = owner.post('/api/dev/session', json={'username':'owner','password':'owner-local'}).json()['csrf_token']
     colleague.post('/api/dev/session', json={'username':'colleague','password':'colleague-local'})

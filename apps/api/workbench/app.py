@@ -24,6 +24,7 @@ from workbench.request_logging import install_request_logging
 from workbench.projects.models import Project, ProjectMember
 from workbench.sessions import SessionStore
 from workbench.knowledge.routes import install_knowledge_routes
+from workbench.guests import install_guest_routes
 from workbench.knowledge.upload_limit import UploadLimitMiddleware
 
 
@@ -80,6 +81,7 @@ class StatusInput(BaseModel):
     focus: str = Field(default="", max_length=10000)
     progress: int | None = Field(default=None, ge=0, le=100)
     expected_version: int | None = None
+    guest_visible: bool = False
     audience_project_ids: list[str] = Field(default_factory=list)
     allocations: list[Allocation] = Field(default_factory=list)
 
@@ -96,6 +98,8 @@ class PublishInput(BaseModel):
 
 
 def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = False, dev_users: dict[str, str] | None = None, storage_root: str | Path | None = None, max_file_bytes: int = 50 * 1024 * 1024, max_batch_files: int = 20) -> FastAPI:
+    if dev_users is not None and not testing and len(dev_users) != 1:
+        raise ValueError("Exactly one development owner account is required")
     if max_file_bytes <= 0 or max_batch_files <= 0:
         raise ValueError("file limits must be positive")
     engine = create_engine(database_url, connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {})
@@ -169,43 +173,44 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
                          request_id=request.state.request_id)
             return {"id": project.id, "name": project.name, "role": "owner"}
 
-    @app.put("/api/projects/{project_id}/members/{member_id}")
-    def set_member(project_id: str, member_id: str, payload: MemberInput, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
-        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
-        with Session(engine) as db, db.begin():
-            project = db.get(Project, project_id)
-            if not project:
-                raise HTTPException(404, "Not found")
-            if project.owner != user or member_id == project.owner:
-                raise HTTPException(403, "Forbidden")
-            member = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project_id, ProjectMember.user_id == member_id).with_for_update())
-            previous_role = member.role if member else None
-            if member is None:
-                member = ProjectMember(project_id=project_id, user_id=member_id, role=payload.role)
-                db.add(member)
-            else:
-                member.role = payload.role
-            record_audit(db, actor_id=user, action="project.member.set", resource_id=project_id,
-                         request_id=request.state.request_id,
-                         details={"member_id": member_id, "old_role": previous_role, "new_role": payload.role})
-            return {"user_id": member_id, "role": member.role}
+    if testing:
+        @app.put("/api/projects/{project_id}/members/{member_id}")
+        def set_member(project_id: str, member_id: str, payload: MemberInput, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+            user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+            with Session(engine) as db, db.begin():
+                project = db.get(Project, project_id)
+                if not project:
+                    raise HTTPException(404, "Not found")
+                if project.owner != user or member_id == project.owner:
+                    raise HTTPException(403, "Forbidden")
+                member = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project_id, ProjectMember.user_id == member_id).with_for_update())
+                previous_role = member.role if member else None
+                if member is None:
+                    member = ProjectMember(project_id=project_id, user_id=member_id, role=payload.role)
+                    db.add(member)
+                else:
+                    member.role = payload.role
+                record_audit(db, actor_id=user, action="project.member.set", resource_id=project_id,
+                             request_id=request.state.request_id,
+                             details={"member_id": member_id, "old_role": previous_role, "new_role": payload.role})
+                return {"user_id": member_id, "role": member.role}
 
-    @app.delete("/api/projects/{project_id}/members/{member_id}", status_code=204)
-    def remove_member(project_id: str, member_id: str, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
-        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
-        with Session(engine) as db, db.begin():
-            project = db.get(Project, project_id)
-            if not project:
-                raise HTTPException(404, "Not found")
-            if project.owner != user or member_id == project.owner:
-                raise HTTPException(403, "Forbidden")
-            member = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project_id, ProjectMember.user_id == member_id).with_for_update())
-            if member is None:
-                raise HTTPException(404, "Not found")
-            record_audit(db, actor_id=user, action="project.member.removed", resource_id=project_id,
-                         request_id=request.state.request_id,
-                         details={"member_id": member_id, "old_role": member.role})
-            db.delete(member)
+        @app.delete("/api/projects/{project_id}/members/{member_id}", status_code=204)
+        def remove_member(project_id: str, member_id: str, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+            user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+            with Session(engine) as db, db.begin():
+                project = db.get(Project, project_id)
+                if not project:
+                    raise HTTPException(404, "Not found")
+                if project.owner != user or member_id == project.owner:
+                    raise HTTPException(403, "Forbidden")
+                member = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project_id, ProjectMember.user_id == member_id).with_for_update())
+                if member is None:
+                    raise HTTPException(404, "Not found")
+                record_audit(db, actor_id=user, action="project.member.removed", resource_id=project_id,
+                             request_id=request.state.request_id,
+                             details={"member_id": member_id, "old_role": member.role})
+                db.delete(member)
 
     @app.get("/api/personal/status")
     def get_status(request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None)):
@@ -311,6 +316,7 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
             return snapshot(row)
 
     install_knowledge_routes(app, engine, actor, object_root, max_file_bytes, max_batch_files)
+    install_guest_routes(app, engine, dev_users, object_root, max_file_bytes, Status, StatusVersion)
     return app
 
 

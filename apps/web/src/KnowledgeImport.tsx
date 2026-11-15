@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 type Project = { id: string; name: string; role: string }
-type Draft = { id: string; state: string; content: string; locator: { start_line?: number; end_line?: number; kind?: 'docx' | 'pptx'; anchors?: {line:number; kind?:string; index?:number; slide?:number; element?:number}[]; warnings?: string[] }; source: { id: string; filename: string } }
+type Draft = { id: string; state: string; guest_visible?: boolean; content: string; locator: { start_line?: number; end_line?: number; kind?: 'docx' | 'pptx'; anchors?: {line:number; kind?:string; index?:number; slide?:number; element?:number}[]; warnings?: string[] }; source: { id: string; filename: string } }
 type Job = { state: string; result: { knowledge_id?: string; reason?: string } | null }
 type JobSummary = {id: string; filename: string; state: string; created_at: string}
 
@@ -21,6 +21,7 @@ export default function KnowledgeImport({ csrf, projects }: { csrf: string; proj
   const [file, setFile] = useState<File | null>(null)
   const [jobId, setJobId] = useState('')
   const [draft, setDraft] = useState<Draft | null>(null)
+  const [guestVisible, setGuestVisible] = useState(false)
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState<JobSummary[]>([])
@@ -52,7 +53,8 @@ export default function KnowledgeImport({ csrf, projects }: { csrf: string; proj
     try {
       const job = await api<Job>(`/api/imports/${encodeURIComponent(selectedJobId)}`)
       if (job.state === 'completed' && job.result?.knowledge_id) {
-        setDraft(await api<Draft>(`/api/knowledge/${encodeURIComponent(job.result.knowledge_id)}`))
+        const version = await api<Draft>(`/api/knowledge/${encodeURIComponent(job.result.knowledge_id)}`)
+        setDraft(version); setGuestVisible(version.guest_visible ?? false)
       } else if (job.state === 'needs_input') {
         setMessage(inputMessages[job.result?.reason ?? ''] ?? '文件需要处理，请检查后重新上传。')
       } else if (job.state === 'failed') {
@@ -67,8 +69,17 @@ export default function KnowledgeImport({ csrf, projects }: { csrf: string; proj
     if (!draft) return
     setBusy(true); setMessage('')
     try {
-      await api('/api/knowledge/publish-batch', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body:JSON.stringify({version_ids:[draft.id]})})
-      setDraft({...draft, state:'published'}); setMessage('知识已发布')
+      await api('/api/knowledge/publish-batch', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body:JSON.stringify({version_ids:[draft.id], guest_visible:guestVisible})})
+      setDraft({...draft, state:'published', guest_visible:guestVisible}); setMessage('知识已发布')
+    } catch (error) { setMessage((error as Error).message) } finally { setBusy(false) }
+  }
+
+  async function saveVisibility() {
+    if (!draft) return
+    setBusy(true); setMessage('')
+    try {
+      await api(`/api/knowledge/${encodeURIComponent(draft.id)}/guest-visibility`, {method:'PUT',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({visible:guestVisible})})
+      setDraft({...draft, guest_visible:guestVisible}); setMessage('访客可见范围已更新')
     } catch (error) { setMessage((error as Error).message) } finally { setBusy(false) }
   }
 
@@ -79,6 +90,6 @@ export default function KnowledgeImport({ csrf, projects }: { csrf: string; proj
     <div className="actions"><button type="button" className="secondary" onClick={loadHistory} disabled={busy || !project}>加载导入记录</button></div>
     {history.length > 0 && <ul>{history.map(item=><li key={item.id}>{item.filename} · {jobLabels[item.state] ?? '未知状态'} · {new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai', dateStyle:'short', timeStyle:'short'}).format(new Date(item.created_at))} <button type="button" disabled={busy} onClick={()=>{setJobId(item.id); refresh(item.id)}}>查看任务</button></li>)}</ul>}
     {message && <p role="status">{message}</p>}
-    {draft && <div><h3>来源：{draft.source.filename}</h3><a href={`/api/sources/${encodeURIComponent(draft.source.id)}/download`}>下载原文件</a><p>{draft.locator.kind === 'docx' ? 'Word 段落 / 表格定位' : draft.locator.kind === 'pptx' ? 'PowerPoint 幻灯片 / 元素定位' : `行 ${draft.locator.start_line}–${draft.locator.end_line}`}</p><p>{draft.state === 'published' ? '已发布' : '草稿'}</p>{draft.locator.warnings?.map(warning=><p key={warning}>{reviewWarnings[warning] ?? '原文件存在需要人工核对的内容。'}</p>)}{draft.locator.anchors && <details><summary>查看来源定位</summary><ul>{draft.locator.anchors.map((anchor,index)=><li key={index}>第 {anchor.line} 行：{draft.locator.kind === 'docx' ? `${anchor.kind === 'table' ? '表格' : '段落'} ${anchor.index}` : `幻灯片 ${anchor.slide}，元素 ${anchor.element}`}</li>)}</ul></details>}<pre>{draft.content}</pre><button type="button" onClick={publish} disabled={busy || draft.state !== 'draft'}>发布知识</button></div>}
+    {draft && <div><h3>来源：{draft.source.filename}</h3><a href={`/api/sources/${encodeURIComponent(draft.source.id)}/download`}>下载原文件</a><p>{draft.locator.kind === 'docx' ? 'Word 段落 / 表格定位' : draft.locator.kind === 'pptx' ? 'PowerPoint 幻灯片 / 元素定位' : `行 ${draft.locator.start_line}–${draft.locator.end_line}`}</p><p>{draft.state === 'published' ? '已发布' : '草稿'}</p>{draft.locator.warnings?.map(warning=><p key={warning}>{reviewWarnings[warning] ?? '原文件存在需要人工核对的内容。'}</p>)}{draft.locator.anchors && <details><summary>查看来源定位</summary><ul>{draft.locator.anchors.map((anchor,index)=><li key={index}>第 {anchor.line} 行：{draft.locator.kind === 'docx' ? `${anchor.kind === 'table' ? '表格' : '段落'} ${anchor.index}` : `幻灯片 ${anchor.slide}，元素 ${anchor.element}`}</li>)}</ul></details>}<pre>{draft.content}</pre><label className="check"><input type="checkbox" checked={guestVisible} disabled={busy} onChange={event=>setGuestVisible(event.target.checked)} />允许临时访客查看此知识</label>{draft.state === 'published' && <button type="button" className="secondary" disabled={busy || guestVisible === (draft.guest_visible ?? false)} onClick={saveVisibility}>保存访客可见范围</button>}<button type="button" onClick={publish} disabled={busy || draft.state !== 'draft'}>发布知识</button></div>}
   </section>
 }

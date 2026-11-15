@@ -3,24 +3,30 @@ import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from workbench.audit import record_audit
 from workbench.jobs.models import Job
-from workbench.knowledge.models import KnowledgeVersion, SourceVersion
+from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
+from workbench.knowledge.source_access import verified_download
 from workbench.projects.models import ProjectMember
+
+
+class GuestVisibilityInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    visible: bool
 
 
 class PublishBatchInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version_ids: list[str] = Field(min_length=1, max_length=100)
+    guest_visible: bool = False
 
 
 def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: Path,
@@ -115,8 +121,9 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
                 raise HTTPException(404, "Not found")
             project_access(db, version.project_id, user, maintain=version.state != "published")
             source = db.get(SourceVersion, version.source_id)
+            shared = db.get(GuestPublication, version.id) is not None
             return {"id":version.id, "project_id":version.project_id, "state":version.state,
-                    "content":version.content, "locator":version.locator,
+                    "content":version.content, "locator":version.locator, "guest_visible":shared,
                     "source": {"id":source.id, "filename":source.filename, "sha256":source.sha256}}
 
     @app.get("/api/sources/{source_id}/download")
@@ -133,17 +140,26 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
             if published is None:
                 project_access(db, source.project_id, user, maintain=True)
             filename, digest, key = source.filename, source.sha256, source.object_key
-        try:
-            with (object_root / key).open("rb") as source_file:
-                content = source_file.read(max_file_bytes + 1)
-        except OSError:
-            raise HTTPException(404, "Source unavailable") from None
-        if len(content) > max_file_bytes or hashlib.sha256(content).hexdigest() != digest:
-            raise HTTPException(409, "Source integrity check failed")
-        return Response(content=content, media_type="application/octet-stream", headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}",
-            "X-Content-Type-Options": "nosniff", "Cache-Control": "no-store",
-        })
+        return verified_download(object_root, key, filename, digest, max_file_bytes)
+
+    @app.put("/api/knowledge/{version_id}/guest-visibility")
+    def set_guest_visibility(version_id: str, payload: GuestVisibilityInput, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        with Session(engine) as db, db.begin():
+            version = db.get(KnowledgeVersion, version_id)
+            if version is None:
+                raise HTTPException(404, "Not found")
+            project_access(db, version.project_id, user, maintain=True)
+            version = db.scalar(select(KnowledgeVersion).where(KnowledgeVersion.id == version_id).with_for_update())
+            if version is None or version.state != "published":
+                raise HTTPException(409, "Only published knowledge can be shared")
+            db.execute(delete(GuestPublication).where(GuestPublication.version_id == version_id))
+            if payload.visible:
+                db.add(GuestPublication(version_id=version_id))
+            record_audit(db, actor_id=user, action="knowledge.guest_visibility.changed", resource_id=version_id,
+                         request_id=request.state.request_id,
+                         details={"project_id":version.project_id, "guest_visible":payload.visible})
+        return {"version_id":version_id, "guest_visible":payload.visible}
 
     @app.post("/api/knowledge/publish-batch")
     def publish_knowledge(payload: PublishBatchInput, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
@@ -164,5 +180,7 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
                 result = db.execute(update(KnowledgeVersion).where(KnowledgeVersion.id == version_id, KnowledgeVersion.state == "draft").values(state="published"))
                 if result.rowcount != 1:
                     raise HTTPException(409, "Version is not a draft")
-                record_audit(db, actor_id=user, action="knowledge.published", resource_id=version_id, request_id=request.state.request_id, details={"project_id":version.project_id})
+                if payload.guest_visible:
+                    db.add(GuestPublication(version_id=version_id))
+                record_audit(db, actor_id=user, action="knowledge.published", resource_id=version_id, request_id=request.state.request_id, details={"project_id":version.project_id, "guest_visible":payload.guest_visible})
         return {"version_ids":payload.version_ids}
