@@ -3,7 +3,7 @@ from workbench.app import create_app
 from test_guest_questions import submit
 
 
-def test_agent_receives_only_shared_evidence_and_no_write_capability(tmp_path):
+def test_agent_receives_published_knowledge_regardless_of_guest_visibility(tmp_path):
     root = tmp_path / 'objects'
     app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", dev_users={'owner':'password'}, storage_root=root)
     calls = []
@@ -20,12 +20,12 @@ def test_agent_receives_only_shared_evidence_and_no_write_capability(tmp_path):
         guest.post('/api/guest/session')
         data = guest.post('/api/guest/questions',json={'project_id':pid,'question':'接口版本'}).json()
         assert data['kind'] == 'generated' and data['message'] == '版本是 V2 [1]。'
-        assert len(calls) == 1 and len(calls[0][1]) == 1
-        assert '私密' not in str(calls)
-        assert data['evidence'][0]['excerpt'] == '接口版本是 V2。'
+        assert len(calls) == 1 and len(calls[0][1]) == 2
+        assert {item['guest_visible'] for item in calls[0][1]} == {True, False}
+        assert any(item['excerpt'] == '接口版本是 V2。' for item in data['evidence'])
 
 
-def test_revoked_knowledge_is_not_returned_after_agent_completes(tmp_path):
+def test_guest_download_revocation_does_not_block_published_project_qa(tmp_path):
     root = tmp_path / 'objects'
     app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", dev_users={'owner':'password'}, storage_root=root)
     with TestClient(app) as owner, TestClient(app) as guest:
@@ -39,11 +39,12 @@ def test_revoked_knowledge_is_not_returned_after_agent_completes(tmp_path):
         app.state.answer_agent = RevokingAgent()
         guest.post('/api/guest/session')
         response = guest.post('/api/guest/questions',json={'project_id':pid,'question':'接口版本'})
-        assert response.status_code == 409
-        assert 'V2' not in response.text
+        assert response.status_code == 200
+        assert response.json()['kind'] == 'generated'
+        assert response.json()['evidence'][0]['guest_visible'] is False
 
 
-def test_agent_failure_after_revocation_does_not_return_old_excerpt(tmp_path):
+def test_agent_failure_after_guest_download_revocation_keeps_published_qa(tmp_path):
     from workbench.questions.agent import AgentError
     root = tmp_path / 'objects'
     app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", dev_users={'owner':'password'}, storage_root=root)
@@ -58,7 +59,9 @@ def test_agent_failure_after_revocation_does_not_return_old_excerpt(tmp_path):
         app.state.answer_agent = FailingAgent()
         guest.post('/api/guest/session')
         response = guest.post('/api/guest/questions',json={'project_id':pid,'question':'接口版本'})
-        assert response.status_code == 409 and 'V2' not in response.text
+        assert response.status_code == 200
+        assert response.json()['agent_unavailable'] is True
+        assert response.json()['evidence'][0]['guest_visible'] is False
 
 
 def test_model_config_is_explicit_and_validated(tmp_path):
@@ -192,7 +195,7 @@ def test_agent_can_assess_authorized_context_when_keywords_do_not_match(tmp_path
         result = guest.post('/api/guest/questions',json={'project_id':project,'question':'请简单介绍一下'}).json()
         assert result['kind'] == 'generated' and len(calls) == 1
         assert result['retrieval_mode'] == 'context'
-        assert '绝密' not in str(calls)
+        assert any(item['guest_visible'] is False for item in calls[0])
 
 
 def test_model_can_abstain_when_evidence_does_not_answer_question(tmp_path):

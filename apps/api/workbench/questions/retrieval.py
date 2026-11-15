@@ -1,10 +1,11 @@
 """Bounded, extractive retrieval over guest-visible published knowledge."""
 import hashlib
+from itertools import chain
 import re
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -76,7 +77,8 @@ def _locator(locator: dict, line_no: int) -> dict | None:
 
 
 def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
-                  root: Path, max_source_bytes: int, *, include_context: bool = False) -> dict:
+                  root: Path, max_source_bytes: int, *, include_context: bool = False, project_published: bool = False,
+                  priority_question: str | None = None) -> dict:
     terms = _terms(question)
     evidence = []
     fallback = []
@@ -84,16 +86,34 @@ def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
     remaining = MAX_SEARCH_CHARS
     limited = False
     with Session(engine) as db:
-        statement = (select(KnowledgeVersion, SourceVersion)
-                     .join(GuestPublication, GuestPublication.version_id == KnowledgeVersion.id)
+        shared = exists(select(GuestPublication.version_id).where(GuestPublication.version_id == KnowledgeVersion.id))
+        statement = (select(KnowledgeVersion, SourceVersion, shared.label('guest_visible'))
                      .join(SourceVersion, SourceVersion.id == KnowledgeVersion.source_id)
                      .join(Project, Project.id == KnowledgeVersion.project_id)
                      .where(Project.id == project_id, Project.owner == owner_id,
                             SourceVersion.project_id == project_id, KnowledgeVersion.state == 'published')
                      .order_by(KnowledgeVersion.id).limit(MAX_DOCUMENTS + 1))
-        rows = db.execute(statement).yield_per(1)
+        if not project_published:
+            statement = statement.where(shared)
+        # Search the whole project's published text before applying the candidate cap.
+        # Otherwise UUID ordering can make later documents permanently unreachable.
+        rows = None
+        priority_terms = _terms(priority_question) if priority_question else []
+        if project_published and priority_terms:
+            current_match = or_(*[func.lower(KnowledgeVersion.content).contains(term, autoescape=True)
+                                  for term in priority_terms])
+            statement = statement.order_by(None).order_by(case((current_match, 0), else_=1), KnowledgeVersion.id)
+        if project_published and terms:
+            matches = db.execute(statement.where(or_(*[
+                func.lower(KnowledgeVersion.content).contains(term, autoescape=True) for term in terms
+            ]))).yield_per(1)
+            first = next(matches, None)
+            if first is not None:
+                rows = chain((first,), matches)
+        if rows is None:
+            rows = db.execute(statement).yield_per(1)
         seen = False
-        for index, (version, source) in enumerate(rows):
+        for index, (version, source, guest_visible) in enumerate(rows):
             seen = True
             if index >= MAX_DOCUMENTS or remaining <= 0:
                 limited = True
@@ -108,7 +128,7 @@ def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
                         if len(text) > 500:
                             context_limited = True
                         candidate = {'knowledge_id':version.id, 'source_id':source.id,
-                                     'filename':source.filename, 'source_sha256':source.sha256,
+                                     'filename':source.filename, 'source_sha256':source.sha256, 'guest_visible':guest_visible,
                                      'locator':position, 'excerpt':text[:500], '_object_key':source.object_key}
                 scanned = text
                 remaining -= consumed
@@ -120,7 +140,7 @@ def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
                         position = min(positions)
                         excerpt = text[max(0, position - 150):position + 350]
                         evidence.append({'knowledge_id':version.id, 'source_id':source.id,
-                                         'filename':source.filename, 'source_sha256':source.sha256,
+                                         'filename':source.filename, 'source_sha256':source.sha256, 'guest_visible':guest_visible,
                                          'locator':locator, 'excerpt':excerpt, '_object_key':source.object_key})
                     break
                 if remaining <= 0:
@@ -135,7 +155,9 @@ def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
                 limited = True
                 break
         if not seen:
-            raise HTTPException(404, 'Not found')
+            project_exists = db.scalar(select(Project.id).where(Project.id == project_id, Project.owner == owner_id))
+            if not project_published or project_exists is None:
+                raise HTTPException(404, 'Not found')
     used_context = bool(include_context and not evidence and fallback)
     if used_context:
         evidence = fallback
@@ -149,11 +171,18 @@ def guest_extract(engine: Engine, owner_id: str, project_id: str, question: str,
     if checked:
         with Session(engine) as db:
             ids = [item['knowledge_id'] for item, _ in checked]
-            valid = set(db.scalars(select(KnowledgeVersion.id)
-                                   .join(GuestPublication, GuestPublication.version_id == KnowledgeVersion.id)
-                                   .join(Project, Project.id == KnowledgeVersion.project_id)
-                                   .where(KnowledgeVersion.id.in_(ids), KnowledgeVersion.project_id == project_id,
-                                          KnowledgeVersion.state == 'published', Project.owner == owner_id)))
+            statement = (select(KnowledgeVersion.id, shared.label('guest_visible'))
+                         .join(Project, Project.id == KnowledgeVersion.project_id)
+                         .where(KnowledgeVersion.id.in_(ids), KnowledgeVersion.project_id == project_id,
+                                KnowledgeVersion.state == 'published', Project.owner == owner_id))
+            if not project_published:
+                statement = statement.where(shared)
+            current_visibility = dict(db.execute(statement).all())
+            valid = set(current_visibility)
+            for item, _ in checked:
+                if item['knowledge_id'] in current_visibility:
+                    item['guest_visible'] = current_visibility[item['knowledge_id']]
+
     unavailable = sum(1 for item, intact in checked if item['knowledge_id'] in valid and not intact)
     evidence = [item for item, intact in checked if item['knowledge_id'] in valid and intact]
     for item in evidence:

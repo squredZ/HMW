@@ -107,14 +107,14 @@ class ReadonlyPiAgent:
         self._script = script
         self._slots = threading.BoundedSemaphore(2)
 
-    def answer(self, question: str, evidence: list[dict]) -> dict:
+    def answer(self, question: str, evidence: list[dict], history: list[dict] | None = None) -> dict:
         if not self._slots.acquire(blocking=False):
             raise AgentError('busy')
         try:
             node = shutil.which('node')
             if not node:
                 raise AgentError('runtime_unavailable')
-            payload = {'question':question, 'evidence':[{'excerpt':item['excerpt']} for item in evidence], 'settings':self._settings}
+            payload = {'question':question, 'evidence':[{'excerpt':item['excerpt']} for item in evidence], 'history':history or [], 'settings':self._settings}
             # Pi receives no owner credentials, database settings or config path.
             env = {key:os.environ[key] for key in ('PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP') if key in os.environ}
             data = json.dumps(payload, ensure_ascii=False).encode('utf-8')

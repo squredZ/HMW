@@ -136,6 +136,7 @@ it('opens the guest workspace by default and keeps owner login separate', async 
     .mockResolvedValueOnce(new Response(JSON.stringify({kind:'guest'}),{status:200}))
     .mockResolvedValueOnce(new Response('',{status:404}))
     .mockResolvedValueOnce(new Response('[]',{status:200}))
+    .mockResolvedValueOnce(new Response('[]',{status:200}))
   vi.stubGlobal('fetch', fetcher)
   render(<App />)
   await screen.findByText('暂未发布工作状态。')
