@@ -176,7 +176,7 @@ def test_worker_bounds_source_read_even_if_object_grows(tmp_path):
         assert result['result']['reason'] == 'source_too_large'
 
 
-def test_streaming_upload_exceeding_total_budget_is_rejected(tmp_path):
+def test_oversized_streaming_file_is_rejected(tmp_path):
     app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", testing=True, storage_root=tmp_path / 'objects', max_file_bytes=4, max_batch_files=1)
     with TestClient(app) as client:
         pid = client.post('/api/projects', headers=h('owner'), json={'name':'A'}).json()['id']
