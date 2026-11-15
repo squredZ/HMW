@@ -21,6 +21,7 @@ from workbench.sessions import SessionStore
 from workbench.questions.retrieval import guest_extract
 from workbench.questions.conversation import ConversationStore, ConversationBusy
 from workbench.questions.agent import AgentError, validate_answer
+from workbench.questions.library import ProjectLibrary
 
 
 question_logger = logging.getLogger('workbench.questions')
@@ -112,12 +113,48 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                 raise HTTPException(409, 'Conversation is busy') from exc
         finished = False
         try:
+            if agent is not None and hasattr(agent, 'explore'):
+                library = ProjectLibrary(engine, owner_id, payload.project_id, object_root, max_file_bytes)
+                try:
+                    # Previous answers may cite sources that have since been withdrawn.
+                    safe_history = [{'question':turn['question'],
+                                     'answer':turn['answer'] if library.history_is_current(turn.get('sources', [])) else ''}
+                                    for turn in history]
+                    generated = agent.explore(payload.question, safe_history, library)
+                    require_guest(request)
+                    library.verify_catalog()
+                    if any(turn['answer'] and not library.history_is_current(original.get('sources', []))
+                           for turn, original in zip(safe_history, history)):
+                        raise HTTPException(409, 'Knowledge availability changed; retry')
+                    evidence = library.verified_evidence()
+                    candidate = validate_answer(generated, len(evidence))
+                    result = {'kind':'generated', 'message':candidate['answer'],
+                              'citations':candidate['citations'], 'ungrounded':not bool(candidate['citations']),
+                              'evidence':evidence, 'agent_invoked':True, 'retrieval_mode':'agent',
+                              'search_limited':len(evidence) >= library.MAX_READS, 'unavailable_sources':0}
+                    if conversation_key:
+                        sources = [(item['knowledge_id'], item['source_sha256']) for item in evidence]
+                        conversations.finish(conversation_key, payload.question, result['message'], sources)
+                        finished = True
+                    question_logger.info('guest_agent_completed request_id=%s project_id=%s reads=%s',
+                                         request.state.request_id, payload.project_id, len(evidence))
+                    return result
+                except AgentError as exc:
+                    question_logger.warning('agent_answer_failed request_id=%s reason=%s', request.state.request_id, exc.reason)
+                    # Preserve the existing verified, extractive fallback.
+                    require_guest(request)
+                    agent = None
+                    agent_failed = True
+            else:
+                agent_failed = False
             search_query = payload.question
             if history:
                 search_query += ' ' + ' '.join(turn['question'] for turn in history[-2:])
             result = guest_extract(engine, owner_id, payload.project_id, search_query, object_root, max_file_bytes,
-                                   include_context=agent is not None, project_published=agent is not None,
+                                   include_context=agent is not None or agent_failed, project_published=agent is not None or agent_failed,
                                    priority_question=payload.question)
+            if agent_failed:
+                result['agent_unavailable'] = True
             if agent is not None and result['evidence']:
                 result['agent_invoked'] = True
                 candidate = None
