@@ -29,9 +29,9 @@ export default function GuestQuestions({projects}:{projects:Project[]}) {
     } catch (caught) { setError((caught as Error).message) } finally { setBusy(false) }
   }
 
-  return <section className="card knowledge-import"><h2>问一问</h2><p>从已分享的项目知识中查找相关原文。结果仅供核对，不会自动生成结论。</p>
+  return <section className="card question-panel"><h2>问一问</h2><p>从已分享的项目知识中查找相关原文。结果仅供核对，不会自动生成结论。</p>
     <form onSubmit={ask}><label>问答项目<select value={project} disabled={busy} onChange={event=>{setProject(event.target.value);setAnswer(null)}}><option value="">选择项目</option>{projects.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-      <label>问题<textarea value={question} onChange={event=>setQuestion(event.target.value)} maxLength={240} rows={3} /></label><button disabled={busy || !project || question.trim().length < 2}>查找依据</button>
+      <label>问题<textarea value={question} onChange={event=>setQuestion(event.target.value)} maxLength={240} rows={3} placeholder="输入你想了解的问题，例如：项目接口规范是什么？" /></label><button disabled={busy || !project || question.trim().length < 2}>查找依据</button>
     </form>
     {error && <p role="status">{error}</p>}{answer && <div><p>{answer.message}</p>{answer.search_limited && <p>本次仅检索了部分资料，请缩小范围或补充关键词。</p>}{(answer.unavailable_sources ?? 0) > 0 && <p>部分来源暂时无法校验，已从结果中排除。</p>}
       {answer.evidence.map((item,index)=><article key={`${item.knowledge_id}-${index}`}><p>{item.filename} · {location(item.locator)}</p><blockquote>{item.excerpt}</blockquote><a href={`/api/guest/sources/${encodeURIComponent(item.source_id)}/download`}>下载来源</a></article>)}
