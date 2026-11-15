@@ -3,6 +3,7 @@ import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
@@ -111,6 +112,46 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
                 raise HTTPException(404, "Not found")
             project_access(db, job.payload["project_id"], user, maintain=True)
             return {"id":job.id, "state":job.state, "result":job.result}
+
+    @app.get("/api/projects/{project_id}/knowledge")
+    def list_knowledge(project_id: str, request: Request, state: Literal["draft", "published", "retired"] | None = None,
+                       q: str = Query(default="", max_length=255), limit: int = Query(default=50, ge=1, le=100),
+                       offset: int = Query(default=0, ge=0, le=10000), x_user_id: str | None = Header(default=None),
+                       x_principal_type: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, None)
+        with Session(engine) as db:
+            project_access(db, project_id, user, maintain=True)
+            query = (select(KnowledgeVersion.id, KnowledgeVersion.state, SourceVersion.filename,
+                            GuestPublication.version_id.is_not(None).label("guest_visible"))
+                     .join(SourceVersion, KnowledgeVersion.source_id == SourceVersion.id)
+                     .outerjoin(GuestPublication, GuestPublication.version_id == KnowledgeVersion.id)
+                     .where(KnowledgeVersion.project_id == project_id, SourceVersion.project_id == project_id))
+            if state:
+                query = query.where(KnowledgeVersion.state == state)
+            if q:
+                query = query.where(SourceVersion.filename.contains(q, autoescape=True))
+            rows = db.execute(query.order_by(KnowledgeVersion.id).offset(offset).limit(limit + 1)).all()
+            return {"items": [{"id": row.id, "state": row.state, "filename": row.filename,
+                               "guest_visible": row.guest_visible} for row in rows[:limit]],
+                    "has_more": len(rows) > limit}
+
+    @app.post("/api/knowledge/{version_id}/retire")
+    def retire_knowledge(version_id: str, request: Request, x_user_id: str | None = Header(default=None),
+                         x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        with Session(engine) as db, db.begin():
+            version = db.get(KnowledgeVersion, version_id)
+            if version is None:
+                raise HTTPException(404, "Not found")
+            project_access(db, version.project_id, user, maintain=True)
+            result = db.execute(update(KnowledgeVersion).where(KnowledgeVersion.id == version_id,
+                                KnowledgeVersion.state == "published").values(state="retired"))
+            if result.rowcount != 1:
+                raise HTTPException(409, "Only published knowledge can be retired")
+            db.execute(delete(GuestPublication).where(GuestPublication.version_id == version_id))
+            record_audit(db, actor_id=user, action="knowledge.retired", resource_id=version_id,
+                         request_id=request.state.request_id, details={"project_id": version.project_id})
+        return {"version_id": version_id, "state": "retired"}
 
     @app.get("/api/knowledge/{version_id}")
     def get_knowledge(version_id: str, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None)):

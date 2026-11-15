@@ -26,7 +26,7 @@ describe('personal status', () => {
     fireEvent.click(screen.getByRole('button', {name:'发布'}))
     await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(5))
     expect(JSON.parse(fetcher.mock.calls[4][1].body)).toEqual({expected_version:1})
-    await screen.findByText('已发布')
+    await screen.findByText('已发布', { selector: 'p[role="status"]' })
   })
 })
 

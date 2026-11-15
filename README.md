@@ -39,7 +39,7 @@ cd apps/api
 .venv/bin/python -m workbench.jobs.worker
 ```
 
-可在页面选择项目并上传单个 UTF-8 Markdown/TXT、DOCX 或 PPTX，待 Worker 处理后刷新任务、预览并发布。DOC/PPT 旧格式暂不支持转换，请先转成 DOCX/PPTX 后重传。文件默认保存在 `apps/api/workbench-objects/`，此目录已被 Git 忽略；后台通过数据库租约领取任务。页面可按项目加载最近 50 条导入记录；Word 的未解决修订会阻止导入，批注需人工核对；PowerPoint 备注不进入正文，图片保留在原文件中并提示人工核对。当前不支持其他编码的直接导入、草稿编辑、知识列表或重试界面。
+可在页面选择项目并上传单个 UTF-8 Markdown/TXT、DOCX 或 PPTX，待 Worker 处理后刷新任务、预览并发布。DOC/PPT 旧格式暂不支持转换，请先转成 DOCX/PPTX 后重传。文件默认保存在 `apps/api/workbench-objects/`，此目录已被 Git 忽略；后台通过数据库租约领取任务。页面可按项目加载最近 50 条导入记录；Word 的未解决修订会阻止导入，批注需人工核对；PowerPoint 备注不进入正文，图片保留在原文件中并提示人工核对。负责人登录后可在“知识管理”中按项目、状态和文件名浏览知识，查看正文及原文件，发布草稿、调整访客可见性或停用已发布知识。停用会取消访客访问，保留正文、原件和审计记录。当前不支持其他编码的直接导入、草稿编辑、知识分类或重试界面。
 
 访问 Vite 输出的本地地址；要管理内容，请进入负责人登录并使用刚才配置的账号和密码。重启 API 后需重新登录；个人状态存储在 `apps/api/workbench-dev.db`。默认 `workbench.app:app` 不启用开发登录，也不会信任测试身份请求头。
 
