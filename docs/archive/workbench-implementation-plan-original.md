@@ -1,5 +1,8 @@
 > 历史归档：本文件保留原始任务拆分和验收思路，含已废弃的多人角色、接口和进度描述，不作为当前实施依据。请使用 [当前实施计划](../workbench-implementation-plan-v0.1.md)。
 
+> 历史归档：本文保留当时的需求、计划和进展记录，其中多人账号、访客权限和 Agent 状态可能已过时。请以 [当前实施计划](../workbench-implementation-plan-v0.1.md) 和 [需求与设计基线](../workbench-requirements-design-v0.1.md) 为准。
+
+
 # 个人 / 团队工作台 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -25,7 +28,7 @@
 
 ## 实施调整（2026-11-15）
 
-- 新需求：仅负责人拥有长期身份，同事通过独立临时会话访问；原多人账号及项目成员管理步骤被此方向取代。同事通过链接直接访问，内容须由负责人明确选择向访客公开，迁移方案见 [单负责人、临时访客调整草案](single-owner-temporary-sessions.md)。
+- 新需求：仅负责人拥有长期身份，同事通过独立临时会话访问；原多人账号及项目成员管理步骤被此方向取代。同事通过链接直接访问，内容须由负责人明确选择向访客公开，迁移方案见 [单负责人、临时访客调整草案](../single-owner-temporary-sessions.md)。
 
 - 保留 Pi 作为计划中的 Agent 运行时，先使用模拟模型和受控工具；现有验证探针不等于生产集成。
 - MVP 不接入 EverOS：不安装运行时依赖，不部署其服务，不使现有功能依赖其可用性。
