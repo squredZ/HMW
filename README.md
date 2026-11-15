@@ -10,9 +10,17 @@ MVP 计划使用 Pi 作为 Agent 运行时，本地知识检索先不接入 Ever
 
 需要 Python 3.12+、uv、Node.js 和 pnpm。仅在自己的电脑上使用脱敏样例，开发账号和会话只为本地调试准备，不能暴露到网络。
 
+在仓库根目录一键安装后端和前端依赖：
+
 ```sh
-uv sync --project apps/api
-pnpm --dir apps/web install
+./scripts/setup.sh
+```
+
+脚本需要预先安装 `uv`、Node.js 和 `pnpm`，会按 `apps/api/uv.lock` 和 `apps/web/pnpm-lock.yaml` 安装依赖；锁文件与声明不一致时会报错。脚本可重复执行，不会启动服务或设置密码。也可分别执行：
+
+```sh
+uv sync --locked --project apps/api
+pnpm --dir apps/web install --frozen-lockfile
 ```
 
 在第一个终端启动 API，替换下面的临时密码：
