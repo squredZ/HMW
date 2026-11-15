@@ -45,8 +45,8 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
             object_root.mkdir(parents=True, exist_ok=True, mode=0o700)
             for upload in files:
                 name = upload.filename or ""
-                if not name or name != Path(name).name or "\\" in name or Path(name).suffix.lower() not in (".md", ".txt") or len(name) > 255:
-                    raise HTTPException(422, "Only Markdown and TXT files are accepted")
+                if not name or name != Path(name).name or "\\" in name or Path(name).suffix.lower() not in (".md", ".txt", ".docx", ".pptx", ".doc", ".ppt") or len(name) > 255:
+                    raise HTTPException(422, "Unsupported document format")
                 source_id, key = str(uuid4()), uuid4().hex
                 path = object_root / key
                 digest = hashlib.sha256()

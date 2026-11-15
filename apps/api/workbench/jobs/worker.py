@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from workbench.jobs.models import Job
 from workbench.jobs.queue import JobQueue, StaleLease
 from workbench.knowledge.models import KnowledgeVersion, SourceVersion
+from workbench.knowledge.parsers.office import ParseBlocked, parse_office
 from workbench.projects.models import ProjectMember
 
 logger = logging.getLogger('workbench.worker')
@@ -66,7 +67,7 @@ def process_one(engine: Engine, storage_root: Path, worker_id: str,
         source = db.get(SourceVersion, job.payload['source_id'])
         membership = db.get(ProjectMember, (requester_project, requester_id))
         allowed = membership is not None and membership.role in ('owner', 'maintainer')
-        source_data = (source.id, source.project_id, source.object_key, source.sha256) if source else None
+        source_data = (source.id, source.project_id, source.object_key, source.sha256, source.filename) if source else None
 
     content = None
     if not allowed:
@@ -74,19 +75,27 @@ def process_one(engine: Engine, storage_root: Path, worker_id: str,
     elif source_data is None:
         state, result = 'failed', {'reason':'source_missing'}
     else:
-        source_id, project_id, object_key, expected_digest = source_data
+        source_id, project_id, object_key, expected_digest, filename = source_data
         try:
             raw, actual_digest = _read_source(Path(storage_root) / object_key, max_source_bytes,
                                               chunk_bytes, queue, lease, clock)
             if actual_digest != expected_digest:
                 state, result = 'failed', {'reason':'source_integrity_failed'}
             else:
-                content = raw.decode('utf-8-sig')
-                if '\x00' in content:
-                    raise UnicodeError('binary content')
+                suffix = Path(filename).suffix.lower()
+                if suffix in ('.docx', '.pptx', '.doc', '.ppt'):
+                    parsed = parse_office(raw, filename)
+                    content, locator = parsed.content, parsed.locator
+                else:
+                    content = raw.decode('utf-8-sig')
+                    if '\x00' in content:
+                        raise UnicodeError('binary content')
+                    locator = {'start_line':1, 'end_line':len(content.splitlines())}
                 state, result = 'completed', {'knowledge_id':str(uuid4())}
         except SourceTooLarge:
             state, result = 'failed', {'reason':'source_too_large'}
+        except ParseBlocked as exc:
+            content, state, result = None, 'needs_input', {'reason':str(exc)}
         except UnicodeError:
             content, state, result = None, 'needs_input', {'reason':'encoding_unrecognized'}
         except StaleLease:
@@ -112,10 +121,9 @@ def process_one(engine: Engine, storage_root: Path, worker_id: str,
             logger.warning('stale import completion discarded; job_id=%s', lease.job_id)
             return True
         if content is not None:
-            lines = len(content.splitlines())
             db.add(KnowledgeVersion(id=result['knowledge_id'], source_id=source_id,
                                     project_id=project_id, content=content, state='draft',
-                                    locator={'start_line':1, 'end_line':lines}))
+                                    locator=locator))
     logger.info(json.dumps({
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'component': 'worker', 'event': 'import_finished',

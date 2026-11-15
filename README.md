@@ -1,6 +1,6 @@
 # HMW 工作台
 
-本仓库依据 `docs/workbench-requirements-design-v0.1.md` 和 `docs/workbench-implementation-plan-v0.1.md` 开发。当前包含本地开发用的个人状态初始切片和 Markdown/TXT 知识导入雏形：本地账号登录、项目成员权限、手动保存、发布和撤回个人状态、按项目共享和每周投入记录。
+本仓库依据 `docs/workbench-requirements-design-v0.1.md` 和 `docs/workbench-implementation-plan-v0.1.md` 开发。当前包含本地开发用的个人状态初始切片和 Markdown/TXT、DOCX/PPTX 知识导入雏形：本地账号登录、项目成员权限、手动保存、发布和撤回个人状态、按项目共享和每周投入记录。
 
 **尚不可试点或用于真实数据。** 尚未实现正式身份认证、正式项目身份与授权管理、审计查询与保留策略、投入统计图表、完整知识管理、问答、问题、通用后台任务和审批。SQLite 开发数据不等于计划要求的 PostgreSQL 生产方案，并发和故障恢复尚未验证。
 
@@ -46,7 +46,7 @@ cd apps/api
 .venv/bin/python -m workbench.jobs.worker
 ```
 
-可在页面选择项目并上传单个 UTF-8 Markdown/TXT，待 Worker 处理后刷新任务、预览并发布。文件默认保存在 `apps/api/workbench-objects/`，此目录已被 Git 忽略；后台通过数据库租约领取任务。页面可按项目加载最近 50 条导入记录；当前不支持其他编码的直接导入、草稿编辑、知识列表或重试界面。
+可在页面选择项目并上传单个 UTF-8 Markdown/TXT、DOCX 或 PPTX，待 Worker 处理后刷新任务、预览并发布。DOC/PPT 旧格式暂不支持转换，请先转成 DOCX/PPTX 后重传。文件默认保存在 `apps/api/workbench-objects/`，此目录已被 Git 忽略；后台通过数据库租约领取任务。页面可按项目加载最近 50 条导入记录；Word 的未解决修订会阻止导入，批注需人工核对；PowerPoint 备注不进入正文，图片保留在原文件中并提示人工核对。当前不支持其他编码的直接导入、草稿编辑、知识列表或重试界面。
 
 访问 Vite 输出的本地地址，用刚才配置的账号和密码登录。重启 API 后需重新登录；个人状态存储在 `apps/api/workbench-dev.db`。默认 `workbench.app:app` 不启用开发登录，也不会信任测试身份请求头。
 
@@ -67,3 +67,5 @@ API 请求诊断以 JSON 记录路由模板、响应状态、耗时及请求 ID�
 导入功能仅供本地脱敏开发验证：尚未验证 PostgreSQL 多进程竞争、Worker 长时间阻塞或故障恢复、断电后孤儿文件清理、生产部署下完整文件上传资源隔离或来源撤销；非 UTF-8 文本需转换后重新上传。
 
 Worker 在分块读取时约每 15 秒续租；如果单次读取阻塞超过租约，旧执行者不能提交结果，任务可被后续 Worker 重新领取。上传同时限制声明长度和流式请求体大小；业务层仍逐文件检查大小。
+
+Office 提取目前在 Worker 进程内执行，压缩包有展开预算，但尚未完成独立沙箱、页面原图预览、批注逐项处理、OCR 或实际组织数据评测；仅用于本地脱敏开发。
