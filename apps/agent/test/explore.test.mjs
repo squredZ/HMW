@@ -19,3 +19,17 @@ test('agent lists and reads knowledge before answering an unrelated phrasing', a
   assert.deepEqual(calls,['list_knowledge','read_knowledge'])
   assert.deepEqual(result.citations,[1])
 })
+
+test('agent is instructed to answer general questions without requiring project knowledge', async () => {
+  const faux=fauxProvider(); const models=createModels(); models.setProvider(faux.provider)
+  faux.setResponses([fauxAssistantMessage('{"answer":"幂等性是指多次执行与一次执行的效果相同。","citations":[]}')])
+  let context
+  const result=await runExploringAgent({question:'什么是幂等性？'},faux.getModel(),(model,seen,options)=>{
+    context=seen
+    return models.streamSimple(model,seen,options)
+  },()=> 'key',async ()=>{ throw new Error('general answer should not require a tool') })
+  assert.match(JSON.stringify(context),/通用问题.*模型.*知识/)
+  assert.match(JSON.stringify(context),/项目事实.*引用/)
+  assert.deepEqual(result.citations,[])
+  assert.match(result.answer,/幂等/)
+})
