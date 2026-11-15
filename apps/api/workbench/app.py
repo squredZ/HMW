@@ -3,18 +3,43 @@
 The header-based identity provider exists exclusively in explicit test mode.
 Production requests are rejected until an approved identity provider is configured.
 """
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from secrets import compare_digest, token_urlsafe
 from uuid import uuid4
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import JSON, DateTime, Integer, String, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 
 class Base(DeclarativeBase):
     pass
+
+
+class Project(Base):
+    __tablename__ = "projects"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    owner: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProjectMember(Base):
+    __tablename__ = "project_members"
+    project_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProjectInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=200)
+
+
+class MemberInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: Literal["member", "maintainer"]
 
 
 class Status(Base):
@@ -37,11 +62,28 @@ class StatusVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class Allocation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str
+    week: date
+    unit: Literal["hours", "percent"]
+    planned: float | None = Field(default=None, ge=0)
+    actual: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_percent(self):
+        if self.unit == "percent" and any(v is not None and v > 100 for v in (self.planned, self.actual)):
+            raise ValueError("percentage must be at most 100")
+        return self
+
+
 class StatusInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     focus: str = Field(default="", max_length=10000)
     progress: int | None = Field(default=None, ge=0, le=100)
     expected_version: int | None = None
+    audience_project_ids: list[str] = Field(default_factory=list)
+    allocations: list[Allocation] = Field(default_factory=list)
 
 
 class LoginInput(BaseModel):
@@ -99,6 +141,53 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
         sessions.pop(request.cookies.get("hmw_session", ""), None)
         response.delete_cookie("hmw_session")
 
+    @app.get("/api/projects")
+    def list_projects(request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, None)
+        with Session(engine) as db:
+            rows = db.execute(select(Project, ProjectMember.role).join(ProjectMember, Project.id == ProjectMember.project_id).where(ProjectMember.user_id == user)).all()
+            return [{"id": project.id, "name": project.name, "role": role} for project, role in rows]
+
+    @app.post("/api/projects")
+    def create_project(payload: ProjectInput, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        with Session(engine) as db, db.begin():
+            project = Project(id=str(uuid4()), name=payload.name, owner=user)
+            db.add(project)
+            db.add(ProjectMember(project_id=project.id, user_id=user, role="owner"))
+            return {"id": project.id, "name": project.name, "role": "owner"}
+
+    @app.put("/api/projects/{project_id}/members/{member_id}")
+    def set_member(project_id: str, member_id: str, payload: MemberInput, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        with Session(engine) as db, db.begin():
+            project = db.get(Project, project_id)
+            if not project:
+                raise HTTPException(404, "Not found")
+            if project.owner != user or member_id == project.owner:
+                raise HTTPException(403, "Forbidden")
+            member = db.get(ProjectMember, (project_id, member_id))
+            if member is None:
+                member = ProjectMember(project_id=project_id, user_id=member_id, role=payload.role)
+                db.add(member)
+            else:
+                member.role = payload.role
+            return {"user_id": member_id, "role": member.role}
+
+    @app.delete("/api/projects/{project_id}/members/{member_id}", status_code=204)
+    def remove_member(project_id: str, member_id: str, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        with Session(engine) as db, db.begin():
+            project = db.get(Project, project_id)
+            if not project:
+                raise HTTPException(404, "Not found")
+            if project.owner != user or member_id == project.owner:
+                raise HTTPException(403, "Forbidden")
+            member = db.get(ProjectMember, (project_id, member_id))
+            if member is None:
+                raise HTTPException(404, "Not found")
+            db.delete(member)
+
     @app.get("/api/personal/status")
     def get_status(request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None)):
         user = actor(request, x_user_id, x_principal_type, None)
@@ -106,10 +195,34 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
             row = db.scalar(select(Status).where(Status.owner == user))
             return snapshot(row) if row else None
 
+    @app.get("/api/personal/status/{owner_id}")
+    def get_published_status(owner_id: str, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, None)
+        with Session(engine) as db:
+            row = db.scalar(select(Status).where(Status.owner == owner_id))
+            if row is None:
+                raise HTTPException(404, "Not found")
+            published = db.scalar(select(StatusVersion).where(StatusVersion.status_id == row.id, StatusVersion.state == "published").order_by(StatusVersion.version.desc()).limit(1))
+            if published is None:
+                raise HTTPException(404, "Not found")
+            owner_projects = set(db.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == owner_id)).all())
+            viewer_projects = set(db.scalars(select(ProjectMember.project_id).where(ProjectMember.user_id == user)).all())
+            allowed = set(published.body.get("audience_project_ids", [])) & owner_projects & viewer_projects
+            if not allowed:
+                raise HTTPException(404, "Not found")
+            body = dict(published.body)
+            body.pop("audience_project_ids", None)
+            body["allocations"] = [a for a in body.get("allocations", []) if a["project_id"] in allowed]
+            return {"id": row.id, "version": published.version, "state": "published", "updated_at": published.created_at.isoformat(), **body}
+
     @app.put("/api/personal/status")
     def save_status(payload: StatusInput, request: Request, x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
         user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
         with Session(engine) as db, db.begin():
+            project_ids = set(payload.audience_project_ids) | {a.project_id for a in payload.allocations}
+            for project_id in project_ids:
+                if db.get(ProjectMember, (project_id, user)) is None:
+                    raise HTTPException(403, "Project access required")
             row = db.scalar(select(Status).where(Status.owner == user).with_for_update())
             if row and payload.expected_version != row.version:
                 raise HTTPException(409, "Version conflict")
@@ -120,7 +233,7 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
                 db.add(row)
             row.version += 1
             row.state = "draft"
-            row.body = payload.model_dump(exclude={"expected_version"})
+            row.body = payload.model_dump(mode="json", exclude={"expected_version"})
             row.updated_at = datetime.now(timezone.utc)
             record(db, row)
             return snapshot(row)
