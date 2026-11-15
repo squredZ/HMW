@@ -1,0 +1,47 @@
+// @vitest-environment jsdom
+import { afterEach, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import KnowledgeImport from './KnowledgeImport'
+
+afterEach(() => { cleanup(); sessionStorage.clear(); vi.restoreAllMocks() })
+
+it('uploads a file, previews its draft, and explicitly publishes it', async () => {
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({jobs:['j1']}),{status:202}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({state:'completed',result:{knowledge_id:'k1'}}),{status:200}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({id:'k1',state:'draft',content:'<script>unsafe</script>\nEvidence',locator:{start_line:1,end_line:2},source:{id:'s1',filename:'a.md'}}),{status:200}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({version_ids:['k1']}),{status:200}))
+  vi.stubGlobal('fetch', fetcher)
+  render(<KnowledgeImport csrf="token" projects={[{id:'p1',name:'项目一',role:'owner'}]} />)
+  fireEvent.change(screen.getByLabelText('导入项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('选择知识文件'),{target:{files:[new File(['source'],'a.md',{type:'text/markdown'})]}})
+  fireEvent.click(screen.getByRole('button',{name:'提交导入'}))
+  await screen.findByText('导入任务已提交')
+  fireEvent.click(screen.getByRole('button',{name:'刷新任务'}))
+  await screen.findByRole('button',{name:'发布知识'})
+  expect(document.querySelector('pre')?.textContent).toBe('<script>unsafe</script>\nEvidence')
+  expect(document.querySelector('script')).toBeNull()
+  expect(screen.getByRole('link',{name:'下载原文件'}).getAttribute('href')).toBe('/api/sources/s1/download')
+  fireEvent.click(screen.getByRole('button',{name:'发布知识'}))
+  await screen.findByText('知识已发布')
+  expect(fetcher.mock.calls[3][0]).toBe('/api/knowledge/publish-batch')
+})
+
+
+it('recovers the submitted job after refreshing the page', async () => {
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({jobs:['persisted']}),{status:202}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({state:'needs_input',result:{reason:'encoding_unrecognized'}}),{status:200}))
+  vi.stubGlobal('fetch', fetcher)
+  const props = {csrf:'token',projects:[{id:'p1',name:'项目一',role:'owner'}]}
+  const page = render(<KnowledgeImport {...props} />)
+  fireEvent.change(screen.getByLabelText('导入项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('选择知识文件'),{target:{files:[new File(['text'],'a.txt')]}})
+  fireEvent.click(screen.getByRole('button',{name:'提交导入'}))
+  await screen.findByText('导入任务已提交')
+  page.unmount()
+  render(<KnowledgeImport {...props} />)
+  fireEvent.change(screen.getByLabelText('导入项目'),{target:{value:'p1'}})
+  fireEvent.click(screen.getByRole('button',{name:'刷新任务'}))
+  await screen.findByText('无法识别文件编码，请转换为 UTF-8 后重新上传。')
+})

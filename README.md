@@ -1,8 +1,8 @@
 # HMW 工作台
 
-本仓库依据 `docs/workbench-requirements-design-v0.1.md` 和 `docs/workbench-implementation-plan-v0.1.md` 开发。当前只有本地开发用的个人状态初始切片：本地账号登录、项目成员权限、手动保存、发布和撤回个人状态、按项目共享和每周投入记录。
+本仓库依据 `docs/workbench-requirements-design-v0.1.md` 和 `docs/workbench-implementation-plan-v0.1.md` 开发。当前包含本地开发用的个人状态初始切片和 Markdown/TXT 知识导入雏形：本地账号登录、项目成员权限、手动保存、发布和撤回个人状态、按项目共享和每周投入记录。
 
-**尚不可试点或用于真实数据。** 尚未实现正式身份认证、正式项目身份与授权管理、审计查询与保留策略、投入统计图表、知识管理、问答、问题、Worker、任务和审批。SQLite 开发数据不等于计划要求的 PostgreSQL 生产方案，并发和故障恢复尚未验证。
+**尚不可试点或用于真实数据。** 尚未实现正式身份认证、正式项目身份与授权管理、审计查询与保留策略、投入统计图表、完整知识管理、问答、问题、通用后台任务和审批。SQLite 开发数据不等于计划要求的 PostgreSQL 生产方案，并发和故障恢复尚未验证。
 
 MVP 计划使用 Pi 作为 Agent 运行时，本地知识检索先不接入 EverOS；未来长期记忆通过适配边界扩展。当前 Pi 也尚未完成产品集成。
 
@@ -39,6 +39,15 @@ export HMW_DEV_USERS_JSON='{"owner":"本地密码一","colleague":"本地密码�
 pnpm --dir apps/web dev
 ```
 
+在第三个终端启动文本导入 Worker（必须和 API 使用同一数据库与文件存储位置）：
+
+```sh
+cd apps/api
+.venv/bin/python -m workbench.jobs.worker
+```
+
+可在页面选择项目并上传单个 UTF-8 Markdown/TXT，待 Worker 处理后刷新任务、预览并发布。文件默认保存在 `apps/api/workbench-objects/`，此目录已被 Git 忽略；后台通过数据库租约领取任务。当前不支持其他编码的直接导入、草稿编辑、知识列表、重试界面或服务重启后的跨标签页任务查找。
+
 访问 Vite 输出的本地地址，用刚才配置的账号和密码登录。重启 API 后需重新登录；个人状态存储在 `apps/api/workbench-dev.db`。默认 `workbench.app:app` 不启用开发登录，也不会信任测试身份请求头。
 
 ## 测试
@@ -54,3 +63,5 @@ API 测试使用 SQLite 和显式测试身份，不代替 PostgreSQL、并发控
 API 请求诊断以 JSON 记录路由模板、响应状态、耗时及请求 ID，不记录正文、查询参数或会话凭据；本地启动关闭 Uvicorn 原始访问日志以免记录查询参数。个人状态并发测试当前使用 SQLite，尚未覆盖 PostgreSQL 或多进程部署。
 
 当前项目和个人状态的成功写操作会在同一数据库事务中记录审计元数据并关联请求 ID；拒绝操作暂通过请求日志记录。尚无审计查询界面、数据库级防篡改或保留清理机制。
+
+导入功能仅供本地脱敏开发验证：尚未验证 PostgreSQL 多进程竞争、Worker 心跳、断电后孤儿文件清理、完整文件上传资源隔离或来源撤销；非 UTF-8 文本需转换后重新上传。

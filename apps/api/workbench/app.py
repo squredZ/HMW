@@ -3,6 +3,8 @@
 The header-based identity provider exists exclusively in explicit test mode.
 Production requests are rejected until an approved identity provider is configured.
 """
+import os
+from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from secrets import compare_digest, token_urlsafe
 from typing import Literal
@@ -19,21 +21,9 @@ from sqlalchemy.orm.exc import StaleDataError
 from workbench.audit import record_audit
 from workbench.db import Base
 from workbench.request_logging import install_request_logging
+from workbench.projects.models import Project, ProjectMember
 from workbench.sessions import SessionStore
-
-
-class Project(Base):
-    __tablename__ = "projects"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    owner: Mapped[str] = mapped_column(String, nullable=False)
-
-
-class ProjectMember(Base):
-    __tablename__ = "project_members"
-    project_id: Mapped[str] = mapped_column(String, primary_key=True)
-    user_id: Mapped[str] = mapped_column(String, primary_key=True)
-    role: Mapped[str] = mapped_column(String, nullable=False)
+from workbench.knowledge.routes import install_knowledge_routes
 
 
 class ProjectInput(BaseModel):
@@ -104,10 +94,31 @@ class PublishInput(BaseModel):
     expected_version: int
 
 
-def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = False, dev_users: dict[str, str] | None = None) -> FastAPI:
+def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = False, dev_users: dict[str, str] | None = None, storage_root: str | Path | None = None, max_file_bytes: int = 50 * 1024 * 1024, max_batch_files: int = 20) -> FastAPI:
+    if max_file_bytes <= 0 or max_batch_files <= 0:
+        raise ValueError("file limits must be positive")
     engine = create_engine(database_url, connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {})
     Base.metadata.create_all(engine)
     app = FastAPI(title="Workbench API")
+    app.state.engine = engine
+    object_root = Path(storage_root or os.environ.get("HMW_STORAGE_ROOT", "./workbench-objects"))
+
+    @app.middleware("http")
+    async def reject_oversized_upload(request: Request, call_next):
+        path = request.url.path
+        if request.method == "POST" and path.startswith("/api/projects/") and path.endswith("/imports"):
+            declared = request.headers.get("content-length")
+            if declared is not None:
+                try:
+                    size = int(declared)
+                except ValueError:
+                    return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length"})
+                if size < 0:
+                    return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length"})
+                if size > max_file_bytes * max_batch_files + 1024 * 1024:
+                    return JSONResponse(status_code=413, content={"detail": "Upload exceeds request limit"})
+        return await call_next(request)
+
     install_request_logging(app)
     sessions = SessionStore()
 
@@ -181,7 +192,7 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
                 raise HTTPException(404, "Not found")
             if project.owner != user or member_id == project.owner:
                 raise HTTPException(403, "Forbidden")
-            member = db.get(ProjectMember, (project_id, member_id))
+            member = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project_id, ProjectMember.user_id == member_id).with_for_update())
             previous_role = member.role if member else None
             if member is None:
                 member = ProjectMember(project_id=project_id, user_id=member_id, role=payload.role)
@@ -202,7 +213,7 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
                 raise HTTPException(404, "Not found")
             if project.owner != user or member_id == project.owner:
                 raise HTTPException(403, "Forbidden")
-            member = db.get(ProjectMember, (project_id, member_id))
+            member = db.scalar(select(ProjectMember).where(ProjectMember.project_id == project_id, ProjectMember.user_id == member_id).with_for_update())
             if member is None:
                 raise HTTPException(404, "Not found")
             record_audit(db, actor_id=user, action="project.member.removed", resource_id=project_id,
@@ -313,6 +324,7 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
                          resource_version=row.version, request_id=request.state.request_id)
             return snapshot(row)
 
+    install_knowledge_routes(app, engine, actor, object_root, max_file_bytes, max_batch_files)
     return app
 
 
