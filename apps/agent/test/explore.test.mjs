@@ -19,3 +19,78 @@ test('agent lists and reads knowledge before answering an unrelated phrasing', a
   assert.deepEqual(calls,['list_knowledge','read_knowledge'])
   assert.deepEqual(result.citations,[1])
 })
+
+test('agent is instructed to answer general questions without requiring project knowledge', async () => {
+  const faux=fauxProvider(); const models=createModels(); models.setProvider(faux.provider)
+  faux.setResponses([fauxAssistantMessage('{"answer":"幂等性是指多次执行与一次执行的效果相同。","citations":[]}')])
+  let context
+  const result=await runExploringAgent({question:'什么是幂等性？'},faux.getModel(),(model,seen,options)=>{
+    context=seen
+    return models.streamSimple(model,seen,options)
+  },()=> 'key',async ()=>{ throw new Error('general answer should not require a tool') })
+  assert.match(JSON.stringify(context),/通用问题.*模型.*知识/)
+  assert.match(JSON.stringify(context),/项目事实.*引用/)
+  assert.deepEqual(result.citations,[])
+  assert.match(result.answer,/幂等/)
+})
+
+test('model output limit is configurable and forwarded to each model call', async () => {
+  const faux=fauxProvider(); const models=createModels(); models.setProvider(faux.provider)
+  faux.setResponses([fauxAssistantMessage('{"answer":"可以。","citations":[]}')])
+  let selected
+  await runExploringAgent({question:'请说明',settings:{max_output_tokens:2048,max_context_bytes:200000}},faux.getModel(),(model,context,options)=>{
+    selected=options.maxTokens
+    return models.streamSimple(model,context,options)
+  },()=> 'key',async ()=>{})
+  assert.equal(selected,2048)
+})
+
+test('context byte budget prevents oversized requests from reaching the provider', async () => {
+  const faux=fauxProvider(); let called=false
+  await assert.rejects(runExploringAgent({question:'测试', history:[{question:'旧问题',answer:'字'.repeat(3000)}],settings:{max_context_bytes:1024}},faux.getModel(),()=>{called=true},()=> 'key',async ()=>{}))
+  assert.equal(called,false)
+})
+
+test('DeepSeek off mode explicitly disables thinking in the provider payload', async () => {
+  const {deepseekProvider}=await import('@earendil-works/pi-ai/providers/deepseek')
+  const {configureModel}=await import('../model-config.mjs')
+  const models=createModels(); models.setProvider(deepseekProvider())
+  const template=models.getModel('deepseek','deepseek-flash')
+  const model=configureModel(template,{model:'deepseek-v4-pro',api_url:'https://api.deepseek.com',max_output_tokens:2048,context_window_tokens:1048576})
+  let payload
+  await assert.rejects(runExploringAgent({question:'你好',settings:{reasoning_effort:'off',max_output_tokens:2048}},model,(selected,context,options)=>models.streamSimple(selected,context,{...options,onPayload: body=>{payload=body;throw new Error('stop before network')}}),()=> 'key',async ()=>{}))
+  assert.deepEqual(payload.thinking,{type:'disabled'})
+  assert.equal(payload.max_tokens,2048)
+})
+
+test('proxy mode refuses unsupported Node versions before connecting', async () => {
+  const {requireProxySupport}=await import('../model-config.mjs')
+  assert.throws(()=>requireProxySupport({HMW_PROXY_REQUIRED:'1'},'22.19.0'))
+  assert.doesNotThrow(()=>requireProxySupport({HMW_PROXY_REQUIRED:'1'},'22.21.0'))
+  assert.doesNotThrow(()=>requireProxySupport({HMW_PROXY_REQUIRED:'1'},'24.0.0'))
+  assert.doesNotThrow(()=>requireProxySupport({},'22.19.0'))
+})
+
+for (const effort of ['low','high','max']) {
+  test(`DeepSeek ${effort} mode forwards the requested thinking effort`, async () => {
+    const {deepseekProvider}=await import('@earendil-works/pi-ai/providers/deepseek')
+    const {configureModel}=await import('../model-config.mjs')
+    const models=createModels(); models.setProvider(deepseekProvider())
+    const model=configureModel(models.getModel('deepseek','deepseek-flash'),{model:'deepseek-v4-pro',api_url:'https://api.deepseek.com'})
+    let payload
+    await assert.rejects(runExploringAgent({question:'你好',settings:{reasoning_effort:effort}},model,(selected,context,options)=>models.streamSimple(selected,context,{...options,onPayload:body=>{payload=body;throw new Error('stop before network')}}),()=> 'key',async ()=>{}))
+    assert.deepEqual(payload.thinking,{type:'enabled'})
+    assert.equal(payload.reasoning_effort,effort)
+  })
+}
+
+test('context byte budget is checked again after a knowledge tool result', async () => {
+  const faux=fauxProvider(); const models=createModels(); models.setProvider(faux.provider)
+  faux.setResponses([fauxAssistantMessage([fauxToolCall('read_knowledge',{id:'doc',offset:0})],{stopReason:'toolUse'})])
+  let calls=0
+  await assert.rejects(runExploringAgent({question:'介绍项目',settings:{max_context_bytes:4000}},faux.getModel(),(model,context,options)=>{
+    calls++
+    return models.streamSimple(model,context,options)
+  },()=> 'key',async ()=>({number:1,text:'文'.repeat(3000),next_offset:null})))
+  assert.equal(calls,1)
+})

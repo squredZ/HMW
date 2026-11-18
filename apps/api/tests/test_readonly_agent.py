@@ -118,7 +118,7 @@ def test_pi_process_does_not_inherit_owner_or_config_secrets(tmp_path, monkeypat
     monkeypatch.setenv('HMW_CONFIG_PATH', '/private/config')
     monkeypatch.setenv('HMW_DATABASE_URL', 'private-database')
     monkeypatch.setattr('workbench.questions.agent.shutil.which', lambda name: '/test/node')
-    def run(command, payload, env):
+    def run(command, payload, env, **kwargs):
         assert 'HMW_DEV_PASSWORD' not in env
         assert 'HMW_CONFIG_PATH' not in env
         assert 'HMW_DATABASE_URL' not in env
@@ -216,3 +216,101 @@ def test_model_can_abstain_when_evidence_does_not_answer_question(tmp_path):
         assert result['kind'] == 'insufficient_evidence' and result['agent_invoked'] is True and len(calls) == 1
         assert 'agent_unavailable' not in result
         assert result['evidence'] == []
+
+
+def test_model_budgets_are_validated_and_forwarded(tmp_path, monkeypatch):
+    import json
+    import pytest
+    from workbench.questions.agent import ReadonlyPiAgent
+    settings = {'api_key':'key','api_url':'https://example.com','model':'deepseek-v4-pro',
+                'max_output_tokens':8192,'context_window_tokens':1048576,
+                'max_context_bytes':150000,'max_answer_chars':12000,'timeout_seconds':180}
+    agent = ReadonlyPiAgent(settings, tmp_path / 'readonly.mjs')
+    monkeypatch.setattr('workbench.questions.agent.shutil.which', lambda _: '/test/node')
+    def run(command, payload, env, **kwargs):
+        configured = json.loads(payload)['settings']
+        assert kwargs['timeout'] == 180
+        assert configured['max_output_tokens'] == 8192
+        assert configured['context_window_tokens'] == 1048576
+        assert configured['max_context_bytes'] == 150000
+        assert configured['max_answer_chars'] == 12000
+        return 0, json.dumps({'answer':'答' * 5000 + ' [1]','citations':[1]}, ensure_ascii=False)
+    monkeypatch.setattr('workbench.questions.agent.run_bounded_process', run)
+    assert len(agent.answer('问题',[{'excerpt':'资料'}])['answer']) > 4000
+    for key, value in [('max_output_tokens',0),('max_context_bytes',True),('max_answer_chars',-1),('timeout_seconds',0)]:
+        with pytest.raises(ValueError):
+            ReadonlyPiAgent({**settings,key:value}, tmp_path / 'agent.mjs')
+    with pytest.raises(ValueError):
+        ReadonlyPiAgent({**settings,'max_output_tokens':8192,'context_window_tokens':8192}, tmp_path / 'agent.mjs')
+
+
+def test_agent_proxy_configuration_is_explicit_and_does_not_leak_other_environment(tmp_path, monkeypatch):
+    import pytest
+    from workbench.questions.agent import ReadonlyPiAgent
+    monkeypatch.setenv('HTTPS_PROXY','http://company.example:3128')
+    monkeypatch.setenv('HMW_DEV_PASSWORD','owner-secret')
+    monkeypatch.setattr('workbench.questions.agent.shutil.which',lambda _: '/test/node')
+    observed=[]
+    def run(command, payload, env, **kwargs):
+        observed.append(env)
+        return 0, '{"answer":"答案 [1]","citations":[1]}'
+    monkeypatch.setattr('workbench.questions.agent.run_bounded_process',run)
+    base={'api_key':'key','api_url':'https://example.com','model':'deepseek-v4-pro'}
+    ReadonlyPiAgent(base,tmp_path / 'agent.mjs').answer('问题',[{'excerpt':'资料'}])
+    assert 'HTTPS_PROXY' not in observed[-1]
+    proxy=ReadonlyPiAgent(base,tmp_path / 'agent.mjs',network={'proxy_mode':'environment','no_proxy':'localhost,127.0.0.1'})
+    proxy.answer('问题',[{'excerpt':'资料'}])
+    assert observed[-1]['HTTPS_PROXY'] == 'http://company.example:3128'
+    assert observed[-1]['NO_PROXY'] == 'localhost,127.0.0.1'
+    assert observed[-1]['NODE_USE_ENV_PROXY'] == '1'
+    assert 'HMW_DEV_PASSWORD' not in observed[-1]
+    with pytest.raises(ValueError):
+        ReadonlyPiAgent(base,tmp_path / 'agent.mjs',network={'proxy_mode':'mystery'})
+
+
+def test_node_proxy_and_no_proxy_route_local_requests(tmp_path):
+    import json
+    import shutil
+    import subprocess
+    import threading
+    import pytest
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from workbench.questions.agent import ReadonlyPiAgent
+    node=shutil.which('node')
+    if not node:
+        pytest.skip('Node not installed')
+    version=subprocess.run([node,'--version'],capture_output=True,text=True,check=True).stdout.strip().lstrip('v')
+    major,minor,*_=map(int,version.split('.'))
+    if not (major >= 24 or (major == 22 and minor >= 21)):
+        pytest.skip('Node has no built-in environment proxy support')
+    class Target(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(b'target')
+        def log_message(self, *args): pass
+    class Proxy(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200); self.end_headers(); self.wfile.write(b'proxy')
+        def do_CONNECT(self):
+            self.send_response(200); self.end_headers(); self.wfile.flush()
+            self.connection.recv(8192)
+            self.connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nproxy')
+        def log_message(self, *args): pass
+    servers=[ThreadingHTTPServer(('127.0.0.1',0),handler) for handler in (Target,Proxy)]
+    threads=[threading.Thread(target=server.serve_forever) for server in servers]
+    for thread in threads: thread.start()
+    try:
+        target,proxy=servers
+        url=f'http://127.0.0.1:{target.server_port}/'
+        proxy_url=f'http://127.0.0.1:{proxy.server_port}'
+        base={'api_key':'key','api_url':'https://example.com','model':'deepseek-v4-pro'}
+        def request(no_proxy):
+            agent=ReadonlyPiAgent(base,tmp_path / 'agent.mjs',network={'proxy_mode':'environment','http_proxy':proxy_url,'no_proxy':no_proxy})
+            result=subprocess.run([node,'-e',f'fetch({json.dumps(url)}).then(r=>r.text()).then(t=>process.stdout.write(t))'],
+                                  env=agent._agent_environment(),capture_output=True,text=True,timeout=10,check=True)
+            return result.stdout
+        assert request('') == 'proxy'
+        assert request('127.0.0.1') == 'target'
+    finally:
+        for server in servers: server.shutdown()
+        for thread in threads: thread.join()
+        for server in servers: server.server_close()

@@ -127,7 +127,7 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                            for turn, original in zip(safe_history, history)):
                         raise HTTPException(409, 'Knowledge availability changed; retry')
                     evidence = library.verified_evidence()
-                    candidate = validate_answer(generated, len(evidence))
+                    candidate = validate_answer(generated, len(evidence), getattr(agent, 'max_answer_chars', 4000))
                     result = {'kind':'generated', 'message':candidate['answer'],
                               'citations':candidate['citations'], 'ungrounded':not bool(candidate['citations']),
                               'evidence':evidence, 'agent_invoked':True, 'retrieval_mode':'agent',
