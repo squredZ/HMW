@@ -1,4 +1,5 @@
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { issueStateLabels } from './issueStates'
 
 type Project = { id: string; name: string }
@@ -67,9 +68,28 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
   const [analyzing, setAnalyzing] = useState<string | null>(null)
   const [list, setList] = useState<IssueList | null>(null)
   const [page, setPage] = useState(0)
+  const [dialogOpen, setDialogOpen] = useState(false)
   const request = useRef<AbortController | null>(null)
-  const submission = useRef<{key:string; project:string; module:string; description:string; log:File} | null>(null)
+  const submission = useRef<{key:string; project:string; module:string; description:string; log:File | null} | null>(null)
   const submitting = useRef(false)
+  const dialog = useRef<HTMLDivElement | null>(null)
+  const openButton = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    if (!dialogOpen) return
+    dialog.current?.focus()
+    return () => openButton.current?.focus()
+  }, [dialogOpen])
+
+  function handleDialogKey(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape' && !busy) { event.preventDefault(); setDialogOpen(false); return }
+    if (event.key !== 'Tab') return
+    const elements = dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled)')
+    if (!elements?.length) { event.preventDefault(); return }
+    const first = elements[0], last = elements[elements.length - 1]
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog.current)) { event.preventDefault(); last.focus() }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+  }
 
   const loadIssues = useCallback(async () => {
     request.current?.abort()
@@ -98,7 +118,7 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (submitting.current || !projects.some(item => item.id === project) || !module.trim() || !description.trim() || !log) return
+    if (submitting.current || !projects.some(item => item.id === project) || !module.trim() || !description.trim()) return
     const current = submission.current
     if (!current || current.project !== project || current.module !== module.trim() ||
         current.description !== description.trim() || current.log !== log) {
@@ -108,12 +128,14 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
     setBusy(true); setMessage('')
     try {
       const body = new FormData()
-      body.append('project_id', project); body.append('module', module.trim()); body.append('description', description.trim()); body.append('log', log)
+      body.append('project_id', project); body.append('module', module.trim()); body.append('description', description.trim())
+      if (log) body.append('log', log)
       const response = await fetch('/api/guest/issues', {method:'POST', credentials:'same-origin', headers:{'Idempotency-Key':submission.current!.key}, body})
       if (!response.ok) throw new Error(response.status === 401 ? '临时会话已失效，请刷新页面。' : response.status === 413 ? '日志文件不能超过 10 MB。' : response.status === 409 ? '提交发生冲突，请刷新页面后重试。' : '提交失败，请确认项目仍可访问后重试。')
       submission.current = null
-      setModule(''); setDescription(''); setLog(null); setFileKey(value => value + 1); setMessage('问题已提交。')
-      await loadIssues()
+      setModule(''); setDescription(''); setLog(null); setFileKey(value => value + 1); setDialogOpen(false); setMessage('问题已提交。')
+      if (page === 0) await loadIssues()
+      else { setList(null); setPage(0) }
     } catch (error) { setMessage(error instanceof TypeError ? '网络异常，提交结果未知，请直接重试。' : (error as Error).message) }
     finally { submitting.current = false; setBusy(false) }
   }
@@ -122,28 +144,32 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
     setAnalyzing(id); setMessage('')
     try {
       const response = await fetch(`/api/guest/issues/${encodeURIComponent(id)}/analyze`, {method:'POST', credentials:'same-origin'})
-      if (!response.ok) throw new Error(response.status === 401 ? '临时会话已失效，请刷新页面。' : response.status === 409 ? '问题缺少日志，或分析已在排队或运行中，请刷新列表。' : '无法提交分析，请稍后重试。')
+      if (!response.ok) throw new Error(response.status === 401 ? '临时会话已失效，请刷新页面。' : response.status === 409 ? '分析已在排队或运行中，请刷新列表。' : '无法提交分析，请稍后重试。')
       await loadIssues()
     } catch (error) { setMessage((error as Error).message) } finally { setAnalyzing(null) }
   }
 
-  return <section className="card"><h2>登记问题</h2><p>选择项目，描述问题并上传日志。问题列表对所有访客可见。</p>
+  return <section className="card issue-board"><div className="issue-board-header"><div><h2>共享问题列表</h2><p>查看已登记问题、处理进度与分析结果。</p></div><div className="actions"><button type="button" className="secondary" onClick={()=>void loadIssues()}>刷新问题</button><button ref={openButton} type="button" onClick={()=>{setMessage(''); setDialogOpen(true)}}>登记问题</button></div></div>
+    {dialogOpen && createPortal(<div className="issue-dialog-backdrop" onMouseDown={event=>{if (event.target === event.currentTarget && !busy) setDialogOpen(false)}}><div ref={dialog} className="issue-dialog card" role="dialog" aria-modal="true" aria-labelledby="issue-dialog-title" tabIndex={-1} onKeyDown={handleDialogKey}>
+    <div className="issue-dialog-header"><div><h2 id="issue-dialog-title">登记问题</h2><p>请填写问题信息，所有访客均可查看。</p></div><button type="button" className="secondary" disabled={busy} aria-label="关闭登记窗口" onClick={()=>setDialogOpen(false)}>×</button></div>
     {projects.length === 0 && <p>暂无可提交问题的项目，请联系负责人创建项目。</p>}
     <form onSubmit={submit}><label>问题所属项目<select value={projects.some(item => item.id === project) ? project : ''} disabled={busy} onChange={event=>setProject(event.target.value)}><option value="">选择项目</option>{projects.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
       <label>功能模块<input value={module} maxLength={200} disabled={busy} onChange={event=>setModule(event.target.value)} /></label>
       <label>问题现象<textarea value={description} maxLength={10000} rows={6} disabled={busy} onChange={event=>setDescription(event.target.value)} placeholder="描述现象、预期结果和必要的复现步骤" /></label>
-      <p>支持日志文件及 zip、tar、tar.gz、rar 压缩包，大小不超过 10 MB。</p><label>日志文件<input key={fileKey} type="file" disabled={busy} onChange={event=>setLog(event.target.files?.[0] ?? null)} /></label>
-      <button disabled={busy || !projects.some(item => item.id === project) || !module.trim() || !description.trim() || !log}>提交问题</button>
-    </form>{message && <p role="status">{message}</p>}
-    <h2>共享问题列表</h2><button type="button" className="secondary" onClick={()=>void loadIssues()}>刷新问题</button>
+      <label>日志文件<input key={fileKey} type="file" disabled={busy} onChange={event=>setLog(event.target.files?.[0] ?? null)} /></label><p className="issue-dialog-hint">可选，支持日志、zip、tar、tar.gz、rar，大小不超过 10 MB。</p>
+      <div className="issue-dialog-actions"><button type="button" className="secondary" disabled={busy} onClick={()=>setDialogOpen(false)}>取消</button><button disabled={busy || !projects.some(item => item.id === project) || !module.trim() || !description.trim()}>提交问题</button></div>
+    </form>{message && <p role="status">{message}</p>}</div></div>, document.body)}
+    {!dialogOpen && message && <p role="status">{message}</p>}
     {listError && <p role="status">{listError}</p>}
+    {!list && !listError && <p role="status">正在加载问题…</p>}
     {list && list.items.length === 0 && <p>暂无问题。</p>}
-    {list?.items.map(issue => <article key={issue.id}><h3>{issue.project_name || issue.project_id || '未知项目'} · {issue.module || issue.title || '未填写模块'}</h3>
+    {list?.items.map(issue => <article className="issue-list-item" key={issue.id}><h3>{issue.project_name || issue.project_id || '未知项目'} · {issue.module || issue.title || '未填写模块'}</h3>
       <p>{issue.description || '未填写问题现象'}</p><p>日志：{issue.log_filename || '无'} · 状态：{issueStateLabels[issue.state ?? ''] ?? '未知'}</p>
       {issue.analysis && <><p>分析状态：{issue.analysis.state === 'queued' ? '排队中' : issue.analysis.state === 'running' ? '分析中' : issue.analysis.state === 'failed' ? '分析失败' : issue.analysis.state === 'completed' ? '分析完成' : issue.analysis.state}</p>
         {issue.analysis.report && <pre>{issue.analysis.report}</pre>}{issue.analysis.state === 'failed' && <p>失败原因：{(issue.analysis.reason && analysisReasons.get(issue.analysis.reason)) || '分析失败，请联系负责人检查后重试。'}</p>}</>}
-      {!issue.log_filename && <p>该问题没有日志，无法分析。</p>}
-      <button type="button" className="secondary" disabled={analyzing !== null || isActive(issue.analysis) || !issue.log_filename} onClick={()=>void analyze(issue.id)}>分析问题</button>
+      {!issue.analysis && <p>分析状态：未开始</p>}
+      {!issue.log_filename && <p>未上传日志，分析将基于问题描述和可用资料。</p>}
+      <button type="button" className="secondary" disabled={analyzing !== null || isActive(issue.analysis)} onClick={()=>void analyze(issue.id)}>分析问题</button>
       {issue.analysis && <AnalysisHistory issueId={issue.id} />}
     </article>)}
     <div className="actions"><button type="button" className="secondary" disabled={page === 0 || busy || analyzing !== null} onClick={()=>{setList(null); setPage(value => value - 1)}}>上一页</button><span>第 {page + 1} 页</span><button type="button" className="secondary" disabled={!list?.has_more || busy || analyzing !== null} onClick={()=>{setList(null); setPage(value => value + 1)}}>下一页</button></div>

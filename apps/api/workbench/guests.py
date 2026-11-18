@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from workbench.audit import record_audit
 from workbench.logging_utils import log_event
-from workbench.issues.models import Issue, IssueSubmission
+from workbench.issues.models import Issue, IssueDetail, IssueSubmission
 from workbench.issues.analysis_models import IssueAttachment, IssueAnalysis, IssueAnalysisUsage
 from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
 from workbench.knowledge.source_access import verified_download
@@ -112,11 +112,12 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
             description = str(form.get('description', '')).strip()
             upload = form.get('log')
             if (not project_id or len(project_id) > 64 or not module or len(module) > 200 or
-                not description or len(description) > 10000 or not isinstance(upload, UploadFile)):
-                raise HTTPException(422, 'Project, module, description and log are required')
-            name = upload.filename or ''
-            if not name or len(name) > 255 or name != Path(name).name or '\\' in name:
-                raise HTTPException(422, 'Invalid log filename')
+                not description or len(description) > 10000 or (upload is not None and not isinstance(upload, UploadFile))):
+                raise HTTPException(422, 'Project, module and description are required')
+            if upload is not None:
+                name = upload.filename or ''
+                if not name or len(name) > 255 or name != Path(name).name or '\\' in name:
+                    raise HTTPException(422, 'Invalid log filename')
             title = description.splitlines()[0][:200]
         else:
             try:
@@ -156,7 +157,7 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                 if not size:
                     raise HTTPException(422, 'Log is empty')
             fingerprint = {'project_id':project_id, 'title':title, 'description':description,
-                           'module':module if upload is not None else None,
+                           'module':module if is_multipart else None,
                            'filename':name if upload is not None else None,
                            'file_sha256':digest.hexdigest() if upload is not None else None}
             payload_digest = hashlib.sha256(json.dumps(fingerprint, ensure_ascii=False, sort_keys=True,
@@ -167,6 +168,8 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                         raise HTTPException(404, 'Not found')
                     db.add(Issue(id=issue_id, project_id=project_id, visitor_id=visitor_id, title=title,
                                  description=description, state='new', version=1, created_at=datetime.now(timezone.utc)))
+                    if is_multipart:
+                        db.add(IssueDetail(issue_id=issue_id, module=module))
                     if upload is not None:
                         db.add(IssueAttachment(issue_id=issue_id, module=module, filename=name, object_key=key, sha256=digest.hexdigest()))
                     if key_digest:
@@ -204,12 +207,13 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
         if not 1 <= limit <= 100 or offset < 0:
             raise HTTPException(422, 'Invalid pagination')
         with Session(engine) as db:
-            rows = db.execute(select(Issue, Project.name, IssueAttachment)
+            rows = db.execute(select(Issue, Project.name, IssueAttachment, IssueDetail)
                               .join(Project, Project.id == Issue.project_id)
                               .outerjoin(IssueAttachment, IssueAttachment.issue_id == Issue.id)
+                              .outerjoin(IssueDetail, IssueDetail.issue_id == Issue.id)
                               .where(Project.owner == owner_id)
                               .order_by(Issue.created_at.desc(), Issue.id.desc()).offset(offset).limit(limit + 1)).all()
-            ids = [issue.id for issue, _, _ in rows[:limit]]
+            ids = [issue.id for issue, _, _, _ in rows[:limit]]
             ranked = (select(IssueAnalysis.id,
                              func.row_number().over(partition_by=IssueAnalysis.issue_id,
                                                     order_by=(IssueAnalysis.created_at.desc(), IssueAnalysis.id.desc())).label('position'))
@@ -222,9 +226,9 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                                          'reason':analysis.reason, 'usage':usage}
                       for analysis, usage in analyses}
             return {'items':[{'id':issue.id, 'project_id':issue.project_id, 'project_name':name,
-                              'module':attachment.module if attachment else '', 'description':issue.description,
+                              'module':detail.module if detail else attachment.module if attachment else '', 'description':issue.description,
                               'log_filename':attachment.filename if attachment else '', 'state':issue.state,
-                              'analysis':latest.get(issue.id)} for issue, name, attachment in rows[:limit]],
+                              'analysis':latest.get(issue.id)} for issue, name, attachment, detail in rows[:limit]],
                     'has_more':len(rows) > limit}
 
     @app.get('/api/guest/issues/{issue_id}/analyses')
@@ -256,8 +260,6 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                                   .where(Issue.id == issue_id, Project.owner == owner_id)).first()
                 if item is None:
                     raise HTTPException(404, 'Not found')
-                if item[1] is None:
-                    raise HTTPException(409, 'Issue has no log')
                 project_id = item[0].project_id
                 db.add(IssueAnalysis(id=job_id, issue_id=issue_id, state='queued',
                                      created_at=datetime.now(timezone.utc).timestamp()))

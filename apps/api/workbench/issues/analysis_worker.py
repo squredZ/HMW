@@ -12,7 +12,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from workbench.issues.analysis_models import IssueAnalysis, IssueAnalysisUsage, IssueAttachment
-from workbench.issues.models import Issue
+from workbench.issues.models import Issue, IssueDetail
 from workbench.projects.models import Project
 from workbench.questions.agent import AgentError, load_agent
 from workbench.questions.library import ProjectLibrary
@@ -23,6 +23,19 @@ from workbench.audit import AuditEvent
 logger = logging.getLogger('workbench.issue_analysis')
 _windows_warning_lock = threading.Lock()
 _last_windows_warning = 0.0
+
+
+def verify_log(log_path: Path, expected_digest: str) -> None:
+    digest = hashlib.sha256()
+    size = 0
+    with log_path.open('rb') as source:
+        while chunk := source.read(1024 * 1024):
+            size += len(chunk)
+            if size > 10 * 1024 * 1024:
+                raise AgentError('log_too_large')
+            digest.update(chunk)
+    if digest.hexdigest() != expected_digest:
+        raise AgentError('log_integrity_failed')
 
 
 @contextmanager
@@ -110,26 +123,21 @@ def process_analysis_one(engine, storage_root: Path, config_path: Path | None, w
         tools = None
         try:
             with Session(engine) as db:
-                row = db.execute(select(Issue, IssueAttachment, Project)
-                                 .join(IssueAttachment, IssueAttachment.issue_id == Issue.id)
+                row = db.execute(select(Issue, IssueAttachment, IssueDetail, Project)
+                                 .outerjoin(IssueAttachment, IssueAttachment.issue_id == Issue.id)
+                                 .outerjoin(IssueDetail, IssueDetail.issue_id == Issue.id)
                                  .join(Project, Project.id == Issue.project_id)
                                  .where(Issue.id == issue_id)).first()
                 if row is None:
                     raise AgentError('issue_missing')
-                issue, attachment, project = row
+                issue, attachment, detail, project = row
                 project_id, owner_id = project.id, project.owner
-                module, description = attachment.module, issue.description
-                log_path, filename, expected_digest = storage_root / attachment.object_key, attachment.filename, attachment.sha256
-            digest = hashlib.sha256()
-            size = 0
-            with log_path.open('rb') as source:
-                while chunk := source.read(1024 * 1024):
-                    size += len(chunk)
-                    if size > 10 * 1024 * 1024:
-                        raise AgentError('log_too_large')
-                    digest.update(chunk)
-            if digest.hexdigest() != expected_digest:
-                raise AgentError('log_integrity_failed')
+                module, description = detail.module if detail else attachment.module if attachment else '', issue.description
+                log_path = storage_root / attachment.object_key if attachment else None
+                filename = attachment.filename if attachment else None
+                expected_digest = attachment.sha256 if attachment else None
+            if log_path is not None:
+                verify_log(log_path, expected_digest)
             if config_path is None:
                 raise AgentError('model_not_configured')
             with config_path.open('rb') as source:
@@ -150,17 +158,10 @@ def process_analysis_one(engine, storage_root: Path, config_path: Path | None, w
             tools.lock_fd = lock_fd
             tools.log_context = {'request_id':request_id, 'project_id':project_id,
                                  'analysis_id':run_id, 'issue_id':issue_id, 'worker_id':worker_id}
-            answer = agent.analyze(f'功能模块：{module}\\n问题现象：{description}\\n请分析日志和代码，说明依据、原因和建议。', tools)
-            verify = hashlib.sha256()
-            size = 0
-            with log_path.open('rb') as source:
-                while chunk := source.read(1024 * 1024):
-                    size += len(chunk)
-                    if size > 10 * 1024 * 1024:
-                        raise AgentError('log_too_large')
-                    verify.update(chunk)
-            if verify.hexdigest() != expected_digest:
-                raise AgentError('log_integrity_failed')
+            log_context = '已提供日志，请按需读取。' if log_path else '未提供日志，不得声称已检查日志。'
+            answer = agent.analyze(f'功能模块：{module}\\n问题现象：{description}\\n{log_context}请分析代码和可用资料，说明依据、原因和建议。', tools)
+            if log_path is not None:
+                verify_log(log_path, expected_digest)
             library.verify_catalog()
             library.verified_evidence()
             state, report, reason = 'completed', answer['answer'], None

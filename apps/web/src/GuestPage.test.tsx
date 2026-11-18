@@ -90,6 +90,7 @@ it('offers all question projects when registering an issue', async () => {
   }))
   render(<GuestPage onOwnerLogin={()=>{}} />)
   await screen.findByRole('option',{name:'未分享知识的项目'})
+  fireEvent.click(screen.getByRole('button',{name:'问题中心'}))
   fireEvent.click(screen.getByRole('button',{name:'登记问题'}))
   expect(screen.getByLabelText('问题所属项目').querySelector('option[value="p1"]')?.textContent).toBe('未分享知识的项目')
 })
