@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
+import SkillManager from './SkillManager'
 
 type Project = { id: string; name: string; role: string }
-type Draft = { id: string; state: string; guest_visible?: boolean; content: string; locator: { start_line?: number; end_line?: number; kind?: 'docx' | 'pptx'; anchors?: {line:number; kind?:string; index?:number; slide?:number; element?:number}[]; warnings?: string[] }; source: { id: string; filename: string } }
+type Draft = { id: string; state: string; module?:string; guest_visible?: boolean; content: string; locator: { start_line?: number; end_line?: number; kind?: 'docx' | 'pptx'; anchors?: {line:number; kind?:string; index?:number; slide?:number; element?:number}[]; warnings?: string[] }; source: { id: string; filename: string } }
 type Job = { state: string; result: { knowledge_id?: string; reason?: string } | null }
 type JobSummary = {id: string; filename: string; state: string; created_at: string}
 
@@ -18,6 +19,8 @@ async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
 
 export default function KnowledgeImport({ csrf, projects }: { csrf: string; projects: Project[] }) {
   const [project, setProject] = useState('')
+  const [module, setModule] = useState('公共知识')
+  const [modules, setModules] = useState<string[]>(['公共知识'])
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState('')
   const [text, setText] = useState('')
@@ -40,13 +43,23 @@ export default function KnowledgeImport({ csrf, projects }: { csrf: string; proj
   }, [tracking, jobId, busy, pollCount])
 
   async function submit(upload: File | null) {
-    if (!project || !upload) return
+    if (!project || !upload || !module.trim()) return
     setBusy(true); setMessage(''); setDraft(null); setJobId('')
     try {
       const form = new FormData()
       form.append('files', upload)
+      form.append('module', module.trim())
       const result = await api<{jobs:string[]}>(`/api/projects/${encodeURIComponent(project)}/imports`, {method:'POST', headers:{'X-CSRF-Token':csrf}, body:form})
       setJobId(result.jobs[0]); sessionStorage.setItem(`hmw.import.${project}`, result.jobs[0]); setPollCount(0); setTracking(true); setMessage('导入任务已提交')
+    } catch (error) { setMessage((error as Error).message) } finally { setBusy(false) }
+  }
+
+  async function loadModules() {
+    if (!project) return
+    setBusy(true); setMessage('')
+    try {
+      const data = await api<string[]>(`/api/projects/${encodeURIComponent(project)}/modules`)
+      setModules(data); setMessage('已有模块已加载，未列出的模块可手动输入。')
     } catch (error) { setMessage((error as Error).message) } finally { setBusy(false) }
   }
 
@@ -113,13 +126,16 @@ export default function KnowledgeImport({ csrf, projects }: { csrf: string; proj
   }
 
   return <section className="card knowledge-import"><h2>导入项目知识</h2><p>支持 UTF-8 文本、Word 和 PowerPoint，先预览草稿再发布。</p>
-    <label>导入项目<select value={project} disabled={busy} onChange={event=>{setProject(event.target.value); setTracking(Boolean(sessionStorage.getItem(`hmw.import.${event.target.value}`))); setPollCount(0); setJobId(sessionStorage.getItem(`hmw.import.${event.target.value}`) ?? ''); setDraft(null); setHistory([]); setMessage('')}}><option value="">选择项目</option>{projects.filter(item=>item.role === 'owner' || item.role === 'maintainer').map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+    <label>导入项目<select value={project} disabled={busy} onChange={event=>{setProject(event.target.value); setModule('公共知识'); setModules(['公共知识']); setTracking(Boolean(sessionStorage.getItem(`hmw.import.${event.target.value}`))); setPollCount(0); setJobId(sessionStorage.getItem(`hmw.import.${event.target.value}`) ?? ''); setDraft(null); setHistory([]); setMessage('')}}><option value="">选择项目</option>{projects.filter(item=>item.role === 'owner' || item.role === 'maintainer').map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+    <label>特性模块<input list="knowledge-modules" value={module} maxLength={200} disabled={busy} onChange={event=>setModule(event.target.value)} /></label><datalist id="knowledge-modules">{modules.map(item=><option key={item} value={item} />)}</datalist>
+    <p>默认“公共知识”，也可输入新模块；问题的功能模块名称与此一致时会优先匹配对应 Skill。</p><button type="button" className="secondary" disabled={busy || !project} onClick={()=>void loadModules()}>加载已有模块</button>
     <label>选择知识文件<input type="file" disabled={busy} accept=".md,.txt,.doc,.docx,.ppt,.pptx" onChange={event=>{setFile(event.target.files?.[0] ?? null); setJobId(''); setDraft(null); setMessage('')}} /></label>
-    <div className="actions"><button type="button" onClick={()=>submit(file)} disabled={busy || !project || !file}>提交导入</button><button type="button" className="secondary" onClick={()=>refresh()} disabled={busy || !jobId}>刷新任务</button></div>
-    <details className="manual-import"><summary>手动输入文字</summary><p>输入标题和内容，提交后将生成可预览、可发布的知识草稿。</p><label>知识标题<input value={title} maxLength={240} disabled={busy} onChange={event=>setTitle(event.target.value)} placeholder="例如：接口说明" /></label><label>知识内容<textarea value={text} disabled={busy} rows={6} onChange={event=>setText(event.target.value)} placeholder="在这里输入知识内容" /></label><button type="button" onClick={submitText} disabled={busy || !project || !title.trim() || !text.trim()}>导入文字</button></details>
+    <div className="actions"><button type="button" onClick={()=>submit(file)} disabled={busy || !project || !file || !module.trim()}>提交导入</button><button type="button" className="secondary" onClick={()=>refresh()} disabled={busy || !jobId}>刷新任务</button></div>
+    <details className="manual-import"><summary>手动输入文字</summary><p>输入标题和内容，提交后将生成可预览、可发布的知识草稿。</p><label>知识标题<input value={title} maxLength={240} disabled={busy} onChange={event=>setTitle(event.target.value)} placeholder="例如：接口说明" /></label><label>知识内容<textarea value={text} disabled={busy} rows={6} onChange={event=>setText(event.target.value)} placeholder="在这里输入知识内容" /></label><button type="button" onClick={submitText} disabled={busy || !project || !module.trim() || !title.trim() || !text.trim()}>导入文字</button></details>
     <div className="actions"><button type="button" className="secondary" onClick={loadHistory} disabled={busy || !project}>加载导入记录</button></div>
     {history.length > 0 && <ul>{history.map(item=><li key={item.id}>{item.filename} · {jobLabels[item.state] ?? '未知状态'} · {new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Shanghai', dateStyle:'short', timeStyle:'short'}).format(new Date(item.created_at))} <button type="button" disabled={busy} onClick={()=>{setJobId(item.id); setPollCount(0); setTracking(true); refresh(item.id)}}>查看任务</button></li>)}</ul>}
     {message && <p role="status">{message}</p>}
-    {draft && <div><h3>来源：{draft.source.filename}</h3><a href={`/api/sources/${encodeURIComponent(draft.source.id)}/download`}>下载原文件</a><p>{draft.locator.kind === 'docx' ? 'Word 段落 / 表格定位' : draft.locator.kind === 'pptx' ? 'PowerPoint 幻灯片 / 元素定位' : `行 ${draft.locator.start_line}–${draft.locator.end_line}`}</p><p>{draft.state === 'published' ? '已发布' : draft.state === 'retired' ? '已停用' : '草稿'}</p>{draft.locator.warnings?.map(warning=><p key={warning}>{reviewWarnings[warning] ?? '原文件存在需要人工核对的内容。'}</p>)}{draft.locator.anchors && <details><summary>查看来源定位</summary><ul>{draft.locator.anchors.map((anchor,index)=><li key={index}>第 {anchor.line} 行：{draft.locator.kind === 'docx' ? `${anchor.kind === 'table' ? '表格' : '段落'} ${anchor.index}` : `幻灯片 ${anchor.slide}，元素 ${anchor.element}`}</li>)}</ul></details>}<pre>{draft.content}</pre>{draft.state !== 'retired' && <label className="check"><input type="checkbox" checked={guestVisible} disabled={busy} onChange={event=>setGuestVisible(event.target.checked)} />允许临时访客查看此知识</label>}{draft.state === 'published' && <button type="button" className="secondary" disabled={busy || guestVisible === (draft.guest_visible ?? false)} onClick={saveVisibility}>保存访客可见范围</button>}<button type="button" onClick={publish} disabled={busy || draft.state !== 'draft'}>发布知识</button></div>}
+    {draft && <div><h3>来源：{draft.source.filename}</h3><p>特性模块：{draft.module ?? '公共知识'}</p><a href={`/api/sources/${encodeURIComponent(draft.source.id)}/download`}>下载原文件</a><p>{draft.locator.kind === 'docx' ? 'Word 段落 / 表格定位' : draft.locator.kind === 'pptx' ? 'PowerPoint 幻灯片 / 元素定位' : `行 ${draft.locator.start_line}–${draft.locator.end_line}`}</p><p>{draft.state === 'published' ? '已发布' : draft.state === 'retired' ? '已停用' : '草稿'}</p>{draft.locator.warnings?.map(warning=><p key={warning}>{reviewWarnings[warning] ?? '原文件存在需要人工核对。'}</p>)}{draft.locator.anchors && <details><summary>查看来源定位</summary><ul>{draft.locator.anchors.map((anchor,index)=><li key={index}>第 {anchor.line} 行：{draft.locator.kind === 'docx' ? `${anchor.kind === 'table' ? '表格' : '段落'} ${anchor.index}` : `幻灯片 ${anchor.slide}，元素 ${anchor.element}`}</li>)}</ul></details>}<pre>{draft.content}</pre>{draft.state !== 'retired' && <label className="check"><input type="checkbox" checked={guestVisible} disabled={busy} onChange={event=>setGuestVisible(event.target.checked)} />允许临时访客查看此知识</label>}{draft.state === 'published' && <button type="button" className="secondary" disabled={busy || guestVisible === (draft.guest_visible ?? false)} onClick={saveVisibility}>保存访客可见范围</button>}<button type="button" onClick={publish} disabled={busy || draft.state !== 'draft'}>发布知识</button></div>}
+    <SkillManager project={project} module={module} csrf={csrf} />
   </section>
 }

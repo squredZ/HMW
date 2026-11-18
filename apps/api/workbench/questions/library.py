@@ -3,7 +3,8 @@ from fastapi import HTTPException
 from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
-from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
+from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion, SourceModule
+from workbench.knowledge.modules import PUBLIC_MODULE
 from workbench.projects.models import Project
 from workbench.questions.retrieval import _locator, _source_valid
 
@@ -35,14 +36,15 @@ class ProjectLibrary:
         if type(offset) is not int or not 0 <= offset <= 100000:
             raise ValueError('invalid offset')
         with Session(self.engine) as db:
-            rows = db.execute(select(KnowledgeVersion.id, SourceVersion.filename, func.length(KnowledgeVersion.content))
+            rows = db.execute(select(KnowledgeVersion.id, SourceVersion.filename, func.length(KnowledgeVersion.content), SourceModule.module)
                               .join(SourceVersion, SourceVersion.id == KnowledgeVersion.source_id)
+                              .outerjoin(SourceModule, SourceModule.source_id == SourceVersion.id)
                               .join(Project, Project.id == KnowledgeVersion.project_id)
                               .where(Project.id == self.project_id, Project.owner == self.owner_id,
                                      SourceVersion.project_id == self.project_id, KnowledgeVersion.state == 'published')
                               .order_by(KnowledgeVersion.id).offset(offset).limit(self.PAGE_SIZE + 1)).all()
             self.listed_ids.update(row[0] for row in rows[:self.PAGE_SIZE])
-            return {'documents': [{'id': row[0], 'name': row[1], 'characters': row[2]} for row in rows[:self.PAGE_SIZE]],
+            return {'documents': [{'id': row[0], 'name': row[1], 'characters': row[2], 'module':row[3] or PUBLIC_MODULE} for row in rows[:self.PAGE_SIZE]],
                     'next_offset': offset + self.PAGE_SIZE if len(rows) > self.PAGE_SIZE else None}
 
     def history_is_current(self, sources):

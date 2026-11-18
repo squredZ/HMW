@@ -2,8 +2,8 @@ import { useState } from 'react'
 import { reviewWarnings } from './KnowledgeImport'
 
 type Project = { id: string; name: string; role: string }
-type Item = { id: string; filename: string; state: string; guest_visible: boolean }
-type Detail = { id: string; state: string; content: string; guest_visible: boolean; source: { id: string; filename: string }; locator?: { kind?: 'docx' | 'pptx'; start_line?: number; end_line?: number; warnings?: string[]; anchors?: { line: number; kind?: string; index?: number; slide?: number; element?: number }[] } }
+type Item = { id: string; filename: string; state: string; module?:string; guest_visible: boolean }
+type Detail = { id: string; state: string; module?:string; content: string; guest_visible: boolean; source: { id: string; filename: string }; locator?: { kind?: 'docx' | 'pptx'; start_line?: number; end_line?: number; warnings?: string[]; anchors?: { line: number; kind?: string; index?: number; slide?: number; element?: number }[] } }
 const labels: Record<string, string> = { draft: '草稿', published: '已发布', retired: '已停用' }
 
 async function api<T>(url: string, options: RequestInit = {}): Promise<T> {
@@ -70,10 +70,10 @@ export default function KnowledgeManager({ csrf, projects }: { csrf: string; pro
     <label>知识状态<select value={state} disabled={busy} onChange={event => { setState(event.target.value); reset() }}><option value="">全部</option><option value="draft">草稿</option><option value="published">已发布</option><option value="retired">已停用</option></select></label>
     <label>按文件名筛选<input value={query} maxLength={255} disabled={busy} onChange={event => { setQuery(event.target.value); reset() }} /></label>
     <button type="button" disabled={busy || !project} onClick={() => load()}>加载知识</button>
-    <ul>{items.map(item => <li key={item.id}>{item.filename} · {labels[item.state] ?? item.state} · {item.guest_visible ? '访客可见' : '访客不可见'} <button type="button" disabled={busy} onClick={() => open(item.id)}>查看 {item.filename}</button></li>)}</ul>
+    <ul>{items.map(item => <li key={item.id}>{item.filename} · {item.module ?? '公共知识'} · {labels[item.state] ?? item.state} · {item.guest_visible ? '访客可见' : '访客不可见'} <button type="button" disabled={busy} onClick={() => open(item.id)}>查看 {item.filename}</button></li>)}</ul>
     {(offset > 0 || hasMore) && <div className="actions"><button type="button" className="secondary" disabled={busy || offset === 0} onClick={() => load(Math.max(0, offset - 50))}>上一页</button><button type="button" className="secondary" disabled={busy || !hasMore || offset >= 10000} onClick={() => load(offset + 50)}>下一页</button></div>}
     {message && <p role="status">{message}</p>}
-    {detail && <div><h3>来源：{detail.source.filename}</h3><p>{labels[detail.state] ?? detail.state}</p><a href={`/api/sources/${encodeURIComponent(detail.source.id)}/download`}>下载原文件</a>{detail.locator && <p>{detail.locator.kind === 'docx' ? 'Word 段落 / 表格定位' : detail.locator.kind === 'pptx' ? 'PowerPoint 幻灯片 / 元素定位' : `行 ${detail.locator.start_line}–${detail.locator.end_line}`}</p>}
+    {detail && <div><h3>来源：{detail.source.filename}</h3><p>特性模块：{detail.module ?? '公共知识'}</p><p>{labels[detail.state] ?? detail.state}</p><a href={`/api/sources/${encodeURIComponent(detail.source.id)}/download`}>下载原文件</a>{detail.locator && <p>{detail.locator.kind === 'docx' ? 'Word 段落 / 表格定位' : detail.locator.kind === 'pptx' ? 'PowerPoint 幻灯片 / 元素定位' : `行 ${detail.locator.start_line}–${detail.locator.end_line}`}</p>}
       {detail.locator?.warnings?.map(warning => <p key={warning}>{reviewWarnings[warning] ?? '原文件存在需要人工核对的内容。'}</p>)}
       {detail.locator?.anchors && <details><summary>查看来源定位</summary><ul>{detail.locator.anchors.map((anchor, index) => <li key={index}>第 {anchor.line} 行：{detail.locator?.kind === 'docx' ? `${anchor.kind === 'table' ? '表格' : '段落'} ${anchor.index}` : `幻灯片 ${anchor.slide}，元素 ${anchor.element}`}</li>)}</ul></details>}
       <pre>{detail.content}</pre>

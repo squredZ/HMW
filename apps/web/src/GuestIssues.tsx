@@ -12,6 +12,8 @@ const analysisReasons = new Map<string, string>([
   ['model_not_configured', '分析模型未配置，请联系负责人配置模型。'],
   ['code_root_unavailable', '项目代码目录不可用，请联系负责人检查配置。'],
   ['skill_root_unavailable', '技能目录不可用，请联系负责人检查配置。'],
+  ['skill_limit', '匹配的 Skill 过多或内容过长，请联系负责人调整。'],
+  ['skill_changed', '分析期间 Skill 已变更，请重新发起分析。'],
   ['log_integrity_failed', '日志校验失败，请重新提交问题和日志。'],
   ['context_limit', '分析内容超过模型上下文限制，请缩小日志范围后重试。'],
   ['timeout', '分析超时，请稍后重试。'],
@@ -58,6 +60,7 @@ function AnalysisHistory({ issueId }: { issueId: string }) {
 export default function GuestIssues({ projects }: { projects: Project[] }) {
   const [project, setProject] = useState('')
   const [module, setModule] = useState('')
+  const [modules, setModules] = useState<string[]>([])
   const [description, setDescription] = useState('')
   const [log, setLog] = useState<File | null>(null)
   const [fileKey, setFileKey] = useState(0)
@@ -70,6 +73,7 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
   const [page, setPage] = useState(0)
   const [dialogOpen, setDialogOpen] = useState(false)
   const request = useRef<AbortController | null>(null)
+  const moduleRequest = useRef<AbortController | null>(null)
   const submission = useRef<{key:string; project:string; module:string; description:string; log:File | null} | null>(null)
   const submitting = useRef(false)
   const dialog = useRef<HTMLDivElement | null>(null)
@@ -109,6 +113,20 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
     void loadIssues()
     return () => request.current?.abort()
   }, [loadIssues])
+
+  useEffect(() => { setModules([]); moduleRequest.current?.abort(); return () => moduleRequest.current?.abort() }, [project])
+
+  async function loadModules() {
+    if (!project) return
+    moduleRequest.current?.abort()
+    const controller = new AbortController(); moduleRequest.current = controller
+    try {
+      const response = await fetch(`/api/guest/projects/${encodeURIComponent(project)}/modules`, {credentials:'same-origin', signal:controller.signal})
+      if (!response.ok) throw new Error()
+      const items:string[] = await response.json()
+      if (!controller.signal.aborted) setModules(items)
+    } catch { if (!controller.signal.aborted) setMessage('模块建议加载失败，仍可手动填写。') }
+  }
 
   useEffect(() => {
     if (!list?.items.some(issue => isActive(issue.analysis))) return
@@ -154,7 +172,7 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
     <div className="issue-dialog-header"><div><h2 id="issue-dialog-title">登记问题</h2><p>请填写问题信息，所有访客均可查看。</p></div><button type="button" className="secondary" disabled={busy} aria-label="关闭登记窗口" onClick={()=>setDialogOpen(false)}>×</button></div>
     {projects.length === 0 && <p>暂无可提交问题的项目，请联系负责人创建项目。</p>}
     <form onSubmit={submit}><label>问题所属项目<select value={projects.some(item => item.id === project) ? project : ''} disabled={busy} onChange={event=>setProject(event.target.value)}><option value="">选择项目</option>{projects.map(item=><option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-      <label>功能模块<input value={module} maxLength={200} disabled={busy} onChange={event=>setModule(event.target.value)} /></label>
+      <label>功能模块<input value={module} list="issue-modules" maxLength={200} disabled={busy} onFocus={()=>void loadModules()} onChange={event=>setModule(event.target.value)} /></label><datalist id="issue-modules">{modules.map(item=><option key={item} value={item} />)}</datalist>
       <label>问题现象<textarea value={description} maxLength={10000} rows={6} disabled={busy} onChange={event=>setDescription(event.target.value)} placeholder="描述现象、预期结果和必要的复现步骤" /></label>
       <label>日志文件<input key={fileKey} type="file" disabled={busy} onChange={event=>setLog(event.target.files?.[0] ?? null)} /></label><p className="issue-dialog-hint">可选，支持日志、zip、tar、tar.gz、rar，大小不超过 10 MB。</p>
       <div className="issue-dialog-actions"><button type="button" className="secondary" disabled={busy} onClick={()=>setDialogOpen(false)}>取消</button><button disabled={busy || !projects.some(item => item.id === project) || !module.trim() || !description.trim()}>提交问题</button></div>

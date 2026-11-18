@@ -168,6 +168,20 @@ it('opens a dialog and submits an issue without a log', async () => {
   expect(await screen.findByText('连接失败')).toBeTruthy()
 })
 
+it('suggests the selected project modules when entering an issue', async () => {
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({items:[],has_more:false})))
+    .mockResolvedValueOnce(new Response(JSON.stringify(['公共知识','通信'])))
+  vi.stubGlobal('fetch', fetcher)
+  render(<GuestIssues projects={[{id:'p1',name:'项目一'}]} />)
+  await screen.findByText('暂无问题。')
+  fireEvent.click(screen.getByRole('button',{name:'登记问题'}))
+  fireEvent.change(screen.getByLabelText('问题所属项目'),{target:{value:'p1'}})
+  fireEvent.focus(screen.getByLabelText('功能模块'))
+  await waitFor(() => expect(document.querySelector('#issue-modules option[value="通信"]')).not.toBeNull())
+  expect(fetcher.mock.calls[1][0]).toBe('/api/guest/projects/p1/modules')
+})
+
 it('closes the registration dialog with Escape and restores focus', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({items:[],has_more:false}))))
   render(<GuestIssues projects={[{id:'p1',name:'项目一'}]} />)

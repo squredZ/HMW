@@ -170,7 +170,8 @@ def test_analysis_logs_lifecycle_with_safe_correlation(tmp_path, monkeypatch, ca
         with caplog.at_level(logging.INFO, logger='workbench.issue_analysis'):
             assert analysis_worker.process_analysis_one(app.state.engine,root,config)
     events=[json.loads(record.message) for record in caplog.records if record.name == 'workbench.issue_analysis']
-    assert [item['event'] for item in events] == ['analysis_started', 'analysis_finished']
+    assert [item['event'] for item in events] == ['analysis_started', 'skills_matched', 'analysis_finished']
+    assert events[1]['skill_count'] == 0
     assert all(item['analysis_id'] == analysis_id and item['issue_id'] == issue for item in events)
     assert events[-1]['state'] == 'completed' and events[-1]['duration_ms'] >= 0
     assert 'secret issue body' not in caplog.text and 'secret log body' not in caplog.text and 'secret report body' not in caplog.text

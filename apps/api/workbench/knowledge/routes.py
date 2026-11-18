@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select, update
 from sqlalchemy.engine import Engine
@@ -16,9 +16,10 @@ from sqlalchemy.orm import Session
 from workbench.audit import record_audit
 from workbench.logging_utils import log_event
 from workbench.jobs.models import Job
-from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
+from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion, SourceModule, ProjectSkill
+from workbench.knowledge.modules import PUBLIC_MODULE, module_name, module_key
 from workbench.knowledge.source_access import verified_download
-from workbench.projects.models import ProjectMember
+from workbench.projects.models import Project, ProjectMember
 
 
 logger = logging.getLogger('workbench.knowledge')
@@ -35,6 +36,13 @@ class PublishBatchInput(BaseModel):
     guest_visible: bool = False
 
 
+class SkillInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=200)
+    module: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=8000)
+
+
 def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: Path,
                              max_file_bytes: int, max_batch_files: int) -> None:
     def project_access(db: Session, project_id: str, user: str, *, maintain: bool = False) -> None:
@@ -43,9 +51,77 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
         if membership is None or (maintain and membership.role not in ("owner", "maintainer")):
             raise HTTPException(404, "Not found")
 
-    @app.post("/api/projects/{project_id}/imports", status_code=202)
-    async def import_text(project_id: str, request: Request, files: list[UploadFile] = File(...), x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+    @app.get('/api/projects/{project_id}/modules')
+    def list_modules(project_id: str, request: Request, x_user_id: str | None = Header(default=None),
+                     x_principal_type: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, None)
+        with Session(engine) as db:
+            project_access(db, project_id, user, maintain=True)
+            knowledge_modules = db.scalars(select(SourceModule.module).join(SourceVersion, SourceVersion.id == SourceModule.source_id)
+                                           .where(SourceVersion.project_id == project_id).distinct().order_by(SourceModule.module).limit(500)).all()
+            skill_modules = db.scalars(select(ProjectSkill.module).where(ProjectSkill.project_id == project_id,
+                                                                           ProjectSkill.active.is_(True)).distinct().order_by(ProjectSkill.module).limit(500)).all()
+        return sorted({PUBLIC_MODULE, *knowledge_modules, *skill_modules}, key=lambda item:(item != PUBLIC_MODULE, item))
+
+    @app.get('/api/projects/{project_id}/skills')
+    def list_skills(project_id: str, request: Request, limit: int = Query(default=50, ge=1, le=100),
+                    offset: int = Query(default=0, ge=0, le=10000), x_user_id: str | None = Header(default=None),
+                    x_principal_type: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, None)
+        with Session(engine) as db:
+            project_access(db, project_id, user, maintain=True)
+            rows = db.scalars(select(ProjectSkill).where(ProjectSkill.project_id == project_id, ProjectSkill.active.is_(True))
+                              .order_by(ProjectSkill.name, ProjectSkill.id).offset(offset).limit(limit + 1)).all()
+            return {'items':[{'id':row.id, 'name':row.name, 'module':row.module, 'content':row.content} for row in rows[:limit]],
+                    'has_more':len(rows) > limit}
+
+    @app.post('/api/projects/{project_id}/skills', status_code=201)
+    def create_skill(project_id: str, payload: SkillInput, request: Request, x_user_id: str | None = Header(default=None),
+                     x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
         user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        try:
+            module = module_name(payload.module)
+            key = module_key(module)
+        except ValueError as exc:
+            raise HTTPException(422, 'Invalid module') from exc
+        if len(payload.content.encode('utf-8')) > 24000:
+            raise HTTPException(422, 'Skill is too large')
+        skill_id = str(uuid4())
+        with Session(engine) as db, db.begin():
+            project_access(db, project_id, user, maintain=True)
+            db.scalar(select(Project.id).where(Project.id == project_id).with_for_update())
+            db.add(ProjectSkill(id=skill_id, project_id=project_id, module=module, module_key=key,
+                                name=payload.name, content=payload.content, active=True))
+            record_audit(db, actor_id=user, action='skill.created', resource_id=skill_id,
+                         request_id=request.state.request_id, details={'project_id':project_id})
+        log_event(logger, logging.INFO, 'skills', 'skill_created', request_id=request.state.request_id,
+                  project_id=project_id, skill_id=skill_id)
+        return {'id':skill_id, 'module':module, 'name':payload.name}
+
+    @app.delete('/api/projects/{project_id}/skills/{skill_id}')
+    def retire_skill(project_id: str, skill_id: str, request: Request, x_user_id: str | None = Header(default=None),
+                     x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        with Session(engine) as db, db.begin():
+            project_access(db, project_id, user, maintain=True)
+            db.scalar(select(Project.id).where(Project.id == project_id).with_for_update())
+            changed = db.execute(update(ProjectSkill).where(ProjectSkill.id == skill_id, ProjectSkill.project_id == project_id,
+                                                            ProjectSkill.active.is_(True)).values(active=False)).rowcount
+            if changed != 1:
+                raise HTTPException(404, 'Not found')
+            record_audit(db, actor_id=user, action='skill.retired', resource_id=skill_id,
+                         request_id=request.state.request_id, details={'project_id':project_id})
+        log_event(logger, logging.INFO, 'skills', 'skill_retired', request_id=request.state.request_id,
+                  project_id=project_id, skill_id=skill_id)
+        return {'id':skill_id, 'active':False}
+
+    @app.post("/api/projects/{project_id}/imports", status_code=202)
+    async def import_text(project_id: str, request: Request, files: list[UploadFile] = File(...), module: str = Form(default=PUBLIC_MODULE), x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None), x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        try:
+            module = module_name(module)
+        except ValueError as exc:
+            raise HTTPException(422, 'Invalid module') from exc
         if len(files) > max_batch_files:
             raise HTTPException(413, "Too many files in batch")
         with Session(engine) as db:
@@ -80,6 +156,7 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
                 for source_id, key, name, digest in staged:
                     job_id = str(uuid4())
                     db.add(SourceVersion(id=source_id, project_id=project_id, filename=name, object_key=key, sha256=digest))
+                    db.add(SourceModule(source_id=source_id, module=module))
                     db.add(Job(id=job_id, kind="import_text", payload={"source_id":source_id,"project_id":project_id,"actor_id":user,"request_id":request.state.request_id}, state="queued", created_at=datetime.now(timezone.utc).timestamp(), token=0))
                     record_audit(db, actor_id=user, action="knowledge.import.submitted", resource_id=source_id, request_id=request.state.request_id, details={"project_id":project_id, "job_id":job_id})
                     jobs.append(job_id)
@@ -129,9 +206,10 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
         user = actor(request, x_user_id, x_principal_type, None)
         with Session(engine) as db:
             project_access(db, project_id, user, maintain=True)
-            query = (select(KnowledgeVersion.id, KnowledgeVersion.state, SourceVersion.filename,
+            query = (select(KnowledgeVersion.id, KnowledgeVersion.state, SourceVersion.filename, SourceModule.module,
                             GuestPublication.version_id.is_not(None).label("guest_visible"))
                      .join(SourceVersion, KnowledgeVersion.source_id == SourceVersion.id)
+                     .outerjoin(SourceModule, SourceModule.source_id == SourceVersion.id)
                      .outerjoin(GuestPublication, GuestPublication.version_id == KnowledgeVersion.id)
                      .where(KnowledgeVersion.project_id == project_id, SourceVersion.project_id == project_id))
             if state:
@@ -140,7 +218,7 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
                 query = query.where(SourceVersion.filename.contains(q, autoescape=True))
             rows = db.execute(query.order_by(KnowledgeVersion.id).offset(offset).limit(limit + 1)).all()
             return {"items": [{"id": row.id, "state": row.state, "filename": row.filename,
-                               "guest_visible": row.guest_visible} for row in rows[:limit]],
+                               "module":row.module or PUBLIC_MODULE, "guest_visible": row.guest_visible} for row in rows[:limit]],
                     "has_more": len(rows) > limit}
 
     @app.post("/api/knowledge/{version_id}/retire")
@@ -171,8 +249,10 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
             project_access(db, version.project_id, user, maintain=version.state != "published")
             source = db.get(SourceVersion, version.source_id)
             shared = db.get(GuestPublication, version.id) is not None
+            source_module = db.get(SourceModule, version.source_id)
             return {"id":version.id, "project_id":version.project_id, "state":version.state,
                     "content":version.content, "locator":version.locator, "guest_visible":shared,
+                    "module":source_module.module if source_module else PUBLIC_MODULE,
                     "source": {"id":source.id, "filename":source.filename, "sha256":source.sha256}}
 
     @app.get("/api/sources/{source_id}/download")

@@ -26,7 +26,8 @@ from workbench.audit import record_audit
 from workbench.logging_utils import log_event
 from workbench.issues.models import Issue, IssueDetail, IssueSubmission
 from workbench.issues.analysis_models import IssueAttachment, IssueAnalysis, IssueAnalysisUsage
-from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
+from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion, SourceModule, ProjectSkill
+from workbench.knowledge.modules import PUBLIC_MODULE
 from workbench.knowledge.source_access import verified_download
 from workbench.projects.models import Project, ProjectMember
 from workbench.sessions import SessionStore
@@ -496,6 +497,21 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
         with Session(engine) as db:
             projects = db.scalars(select(Project).where(Project.owner == owner_id).order_by(Project.name, Project.id)).all()
             return [{'id':project.id, 'name':project.name} for project in projects]
+
+    @app.get('/api/guest/projects/{project_id}/modules')
+    def guest_modules(project_id: str, request: Request):
+        require_guest(request)
+        with Session(engine) as db:
+            if not db.scalar(select(Project.id).where(Project.id == project_id, Project.owner == owner_id)):
+                raise HTTPException(404, 'Not found')
+            knowledge = db.scalars(select(SourceModule.module)
+                                   .join(SourceVersion, SourceVersion.id == SourceModule.source_id)
+                                   .join(KnowledgeVersion, KnowledgeVersion.source_id == SourceVersion.id)
+                                   .where(SourceVersion.project_id == project_id, KnowledgeVersion.project_id == project_id,
+                                          KnowledgeVersion.state == 'published').distinct().order_by(SourceModule.module).limit(500)).all()
+            skills = db.scalars(select(ProjectSkill.module).where(ProjectSkill.project_id == project_id,
+                                                                   ProjectSkill.active.is_(True)).distinct().order_by(ProjectSkill.module).limit(500)).all()
+        return sorted({PUBLIC_MODULE, *knowledge, *skills}, key=lambda item:(item != PUBLIC_MODULE, item))
 
     @app.get('/api/guest/projects')
     def guest_projects(request: Request):

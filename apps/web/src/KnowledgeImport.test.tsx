@@ -5,6 +5,26 @@ import KnowledgeImport from './KnowledgeImport'
 
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.restoreAllMocks() })
 
+it('binds imports and registered skills to the chosen feature module', async () => {
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({jobs:['j1']}), {status:202}))
+    .mockResolvedValueOnce(new Response(JSON.stringify({id:'s1'}), {status:201}))
+  vi.stubGlobal('fetch', fetcher)
+  render(<KnowledgeImport csrf="token" projects={[{id:'p1',name:'项目一',role:'owner'}]} />)
+  fireEvent.change(screen.getByLabelText('导入项目'),{target:{value:'p1'}})
+  expect((screen.getByLabelText('特性模块') as HTMLInputElement).value).toBe('公共知识')
+  fireEvent.change(screen.getByLabelText('特性模块'),{target:{value:'通信'}})
+  fireEvent.change(screen.getByLabelText('选择知识文件'),{target:{files:[new File(['text'],'a.txt')]}})
+  fireEvent.click(screen.getByRole('button',{name:'提交导入'}))
+  await screen.findByText('导入任务已提交')
+  expect((fetcher.mock.calls[0][1].body as FormData).get('module')).toBe('通信')
+  fireEvent.change(screen.getByLabelText('Skill 名称'),{target:{value:'链路排查'}})
+  fireEvent.change(screen.getByLabelText('Skill 内容'),{target:{value:'检查链路状态'}})
+  fireEvent.click(screen.getByRole('button',{name:'保存 Skill'}))
+  await screen.findByText('Skill 已保存')
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({module:'通信',name:'链路排查',content:'检查链路状态'})
+})
+
 it('uploads a file, previews its draft, and explicitly publishes it', async () => {
   const fetcher = vi.fn()
     .mockResolvedValueOnce(new Response(JSON.stringify({jobs:['j1']}),{status:202}))
