@@ -282,6 +282,9 @@ def run_tool_process(command: list[str], payload: dict, env: dict, library, *, t
                 message = json.loads(line)
                 if not isinstance(message, dict):
                     raise ValueError()
+                if message.get('type') == 'error':
+                    reason = message.get('reason')
+                    raise AgentError(reason if reason == 'context_limit' else 'provider_error')
                 if message.get('type') == 'answer':
                     return validate_answer(message.get('answer'), len(library.evidence), payload['settings'].get('max_answer_chars', 4000))
                 if message.get('type') != 'tool' or not isinstance(message.get('args'), dict):

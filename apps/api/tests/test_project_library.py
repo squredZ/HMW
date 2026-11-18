@@ -99,3 +99,22 @@ def test_agent_can_reply_conversationally_without_claiming_a_citation(tmp_path):
         result=guest.post('/api/guest/questions',json={'project_id':project,'question':'你好'}).json()
         assert result['kind'] == 'generated' and result['ungrounded'] is True
         assert result['message'] == '你好，你想了解项目的哪个方面？'
+
+
+def test_agent_timeout_is_distinguished_without_exposing_error_details(tmp_path):
+    from workbench.questions.agent import AgentError
+    root = tmp_path / 'objects'
+    app = create_app(f'sqlite:///{tmp_path / "db.sqlite"}', dev_users={'owner':'password'}, storage_root=root)
+    class TimeoutAgent:
+        def explore(self, question, history, library):
+            raise AgentError('timeout')
+    app.state.answer_agent = TimeoutAgent()
+    with TestClient(app) as owner, TestClient(app) as guest:
+        csrf = {'X-CSRF-Token':owner.post('/api/dev/session',json={'username':'owner','password':'password'}).json()['csrf_token']}
+        project = owner.post('/api/projects',headers=csrf,json={'name':'项目'}).json()['id']
+        submit(owner,app,root,project,csrf,'项目资料。',share=False)
+        guest.post('/api/guest/session')
+        data = guest.post('/api/guest/questions',json={'project_id':project,'question':'介绍项目'}).json()
+        assert data['agent_unavailable'] is True
+        assert data['agent_invoked'] is True
+        assert data['agent_error'] == 'timeout'

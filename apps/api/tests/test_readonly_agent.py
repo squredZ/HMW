@@ -324,3 +324,20 @@ def test_exploring_agent_deadline_is_reported_as_timeout():
     with pytest.raises(AgentError, match='^timeout$'):
         run_tool_process([sys.executable, '-c', 'import time; time.sleep(10)'],
                          {'settings': {}}, dict(os.environ), None, timeout=0.1)
+
+
+def test_context_overflow_crosses_agent_process_boundary():
+    import os
+    import shutil
+    import pytest
+    from pathlib import Path
+    from workbench.questions.agent import AgentError, run_tool_process
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node is unavailable')
+    script = Path(__file__).resolve().parents[3] / 'apps' / 'agent' / 'explore.mjs'
+    payload = {'question':'介绍项目', 'history':[{'question':'问题','answer':'字' * 3000}],
+               'settings':{'model':'deepseek-v4-pro','api_url':'https://api.deepseek.com','api_key':'unused',
+                           'reasoning_effort':'off','max_context_bytes':1024}}
+    with pytest.raises(AgentError, match='^context_limit$'):
+        run_tool_process([node, str(script)], payload, dict(os.environ), None, timeout=5)

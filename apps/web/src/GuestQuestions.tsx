@@ -3,7 +3,7 @@ import { FormEvent, useEffect, useState } from 'react'
 type Project = {id:string; name:string}
 type Locator = {kind?:string; start_line?:number; end_line?:number; index?:number; block_kind?:string; slide?:number; element?:number}
 type Evidence = {knowledge_id:string; source_id:string; filename:string; locator:Locator; excerpt:string; guest_visible?:boolean}
-type Answer = {kind:'extractive' | 'insufficient_evidence' | 'generated'; message:string; search_limited:boolean; unavailable_sources?:number; agent_unavailable?:boolean; agent_invoked?:boolean; ungrounded?:boolean; retrieval_mode?:'keyword' | 'context' | 'agent'; citations?:number[]; evidence:Evidence[]}
+type Answer = {kind:'extractive' | 'insufficient_evidence' | 'generated'; message:string; search_limited:boolean; unavailable_sources?:number; agent_unavailable?:boolean; agent_error?:'timeout' | 'busy' | 'context_limit' | 'unavailable'; agent_invoked?:boolean; ungrounded?:boolean; retrieval_mode?:'keyword' | 'context' | 'agent'; citations?:number[]; evidence:Evidence[]}
 type Turn = {question:string; answer:Answer}
 
 function conversationId(): string {
@@ -60,7 +60,7 @@ export default function GuestQuestions({projects}:{projects:Project[]}) {
       {turn.answer.kind === 'insufficient_evidence' && !turn.answer.agent_invoked && <p>没有可用于分析的资料，本次未调用 Agent。</p>}
       {turn.answer.kind === 'extractive' && !turn.answer.agent_invoked && <p>当前仅展示检索原文；如需 AI 回答，请确认模型已启用。</p>}
       {turn.answer.kind === 'generated' && turn.answer.retrieval_mode === 'context' && <p>未命中关键词，已使用有限的项目资料上下文。</p>}
-      {turn.answer.agent_unavailable && <p>模型暂不可用，以下为原文检索结果。</p>}<p>{turn.answer.message}</p>
+      {turn.answer.agent_unavailable && <p>{turn.answer.agent_error === 'timeout' ? '模型响应超时，请稍后重试。' : turn.answer.agent_error === 'busy' ? '问答请求较多，请稍后重试。' : turn.answer.agent_error === 'context_limit' ? '对话上下文超过限制，请开始新对话或缩小问题范围。' : '模型暂不可用，请稍后重试。'}{turn.answer.evidence.length > 0 && ' 以下为原文检索结果。'}</p>}<p>{turn.answer.message}</p>
       {turn.answer.search_limited && <p>本次仅检索了部分资料，请缩小范围或补充关键词。</p>}{(turn.answer.unavailable_sources ?? 0) > 0 && <p>部分来源暂时无法校验，已从结果中排除。</p>}
       {turn.answer.evidence.map((item,index)=><article key={`${item.knowledge_id}-${index}`}><p>{turn.answer.kind === 'generated' && `[${index + 1}] `}{item.filename} · {location(item.locator)}</p><blockquote>{item.excerpt}</blockquote>{item.guest_visible !== false ? <a href={`/api/guest/sources/${encodeURIComponent(item.source_id)}/download`}>下载来源</a> : <small>原件未对访客开放下载</small>}</article>)}
     </div></div>)}</div>

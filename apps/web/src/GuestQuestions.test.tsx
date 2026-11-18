@@ -92,3 +92,26 @@ it('keeps multiple turns in one conversation and starts a new one on request', a
   await screen.findByText('新问题')
   expect(JSON.parse(fetcher.mock.calls[2][1].body).conversation_id).not.toBe(first.conversation_id)
 })
+
+it('explains a context limit when agent generation fails', async () => {
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({kind:'extractive',message:'相关原文',agent_invoked:true,agent_unavailable:true,agent_error:'context_limit',search_limited:false,evidence:[]}))))
+  render(<GuestQuestions projects={[{id:'p1',name:'项目一'}]} />)
+  fireEvent.change(screen.getByLabelText('问答项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('问题'),{target:{value:'介绍项目'}})
+  fireEvent.click(screen.getByRole('button',{name:'发送'}))
+  await screen.findByText(/对话上下文超过限制/)
+})
+
+it.each([
+  ['timeout', '模型响应超时，请稍后重试。'],
+  ['busy', '问答请求较多，请稍后重试。'],
+  ['unavailable', '模型暂不可用，请稍后重试。'],
+])('shows the %s failure without claiming an extract exists', async (reason, message) => {
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({kind:'insufficient_evidence',message:'未找到依据。',agent_invoked:true,agent_unavailable:true,agent_error:reason,search_limited:false,evidence:[]}))))
+  render(<GuestQuestions projects={[{id:'p1',name:'项目一'}]} />)
+  fireEvent.change(screen.getByLabelText('问答项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('问题'),{target:{value:'介绍项目'}})
+  fireEvent.click(screen.getByRole('button',{name:'发送'}))
+  await screen.findByText(message)
+  expect(screen.queryByText(/以下为原文检索结果/)).toBeNull()
+})

@@ -112,3 +112,9 @@ test('V4 Pro uses its own model capabilities', async () => {
   const model = configureModel(models, {model:'deepseek-v4-pro', api_url:'https://api.deepseek.com'})
   assert.deepEqual(model.input, ['text'])
 })
+
+test('context overflow is reported as a bounded protocol error', async () => {
+  const faux = fauxProvider()
+  await assert.rejects(runExploringAgent({question:'测试',history:[{answer:'字'.repeat(3000)}],settings:{max_context_bytes:1024}},
+    faux.getModel(),()=>{},()=> 'key',async ()=>{}), /context_limit/)
+})
