@@ -7,3 +7,6 @@ node_modules/
 dist/
 workbench-objects/
 /.hmw.toml
+
+workbench-logs/
+*.analysis.lock

@@ -1,5 +1,6 @@
 """Authorized text imports, knowledge previews, publication and source downloads."""
 import hashlib
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,10 +14,14 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from workbench.audit import record_audit
+from workbench.logging_utils import log_event
 from workbench.jobs.models import Job
 from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
 from workbench.knowledge.source_access import verified_download
 from workbench.projects.models import ProjectMember
+
+
+logger = logging.getLogger('workbench.knowledge')
 
 
 class GuestVisibilityInput(BaseModel):
@@ -75,10 +80,13 @@ def install_knowledge_routes(app: FastAPI, engine: Engine, actor, object_root: P
                 for source_id, key, name, digest in staged:
                     job_id = str(uuid4())
                     db.add(SourceVersion(id=source_id, project_id=project_id, filename=name, object_key=key, sha256=digest))
-                    db.add(Job(id=job_id, kind="import_text", payload={"source_id":source_id,"project_id":project_id,"actor_id":user}, state="queued", created_at=datetime.now(timezone.utc).timestamp(), token=0))
+                    db.add(Job(id=job_id, kind="import_text", payload={"source_id":source_id,"project_id":project_id,"actor_id":user,"request_id":request.state.request_id}, state="queued", created_at=datetime.now(timezone.utc).timestamp(), token=0))
                     record_audit(db, actor_id=user, action="knowledge.import.submitted", resource_id=source_id, request_id=request.state.request_id, details={"project_id":project_id, "job_id":job_id})
                     jobs.append(job_id)
             committed = True
+            log_event(logger, logging.INFO, 'knowledge', 'imports_queued',
+                      request_id=request.state.request_id, project_id=project_id, job_ids=jobs,
+                      source_ids=[source_id for source_id, _, _, _ in staged], count=len(jobs))
             return {"jobs": jobs}
         finally:
             for upload in files:

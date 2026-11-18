@@ -1,8 +1,8 @@
 """Read-only, short-lived guest access to explicitly shared owner content."""
-import json
 import hashlib
 import os
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import token_urlsafe
@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from workbench.audit import record_audit
+from workbench.logging_utils import log_event
 from workbench.issues.models import Issue
 from workbench.issues.analysis_models import IssueAttachment, IssueAnalysis
 from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
@@ -31,6 +32,7 @@ from workbench.questions.library import ProjectLibrary
 
 
 question_logger = logging.getLogger('workbench.questions')
+issue_logger = logging.getLogger('workbench.issues')
 
 
 class GuestIssue(BaseModel):
@@ -148,6 +150,9 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                 record_audit(db, actor_id=visitor_id, action='issue.submitted', resource_id=issue_id,
                              request_id=request.state.request_id, details={'project_id':project_id})
             committed = True
+            log_event(issue_logger, logging.INFO, 'issues', 'issue_submitted',
+                      request_id=request.state.request_id, project_id=project_id, issue_id=issue_id,
+                      has_log=upload is not None)
             return {'id':issue_id, 'state':'new'}
         finally:
             if upload is not None:
@@ -194,12 +199,15 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                     raise HTTPException(404, 'Not found')
                 if item[1] is None:
                     raise HTTPException(409, 'Issue has no log')
+                project_id = item[0].project_id
                 db.add(IssueAnalysis(id=job_id, issue_id=issue_id, state='queued',
                                      created_at=datetime.now(timezone.utc).timestamp()))
                 record_audit(db, actor_id=visitor_id, action='issue.analysis.requested', resource_id=issue_id,
                              request_id=request.state.request_id, details={'analysis_id':job_id})
         except IntegrityError as exc:
             raise HTTPException(409, 'Analysis already queued or running') from exc
+        log_event(issue_logger, logging.INFO, 'issues', 'analysis_queued',
+                  request_id=request.state.request_id, issue_id=issue_id, analysis_id=job_id, project_id=project_id)
         return {'id':job_id, 'state':'queued'}
 
     @app.post('/api/guest/questions')
@@ -217,7 +225,11 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
         try:
             if agent is not None and hasattr(agent, 'explore'):
                 library = ProjectLibrary(engine, owner_id, payload.project_id, object_root, max_file_bytes)
+                library.log_context = {'request_id':request.state.request_id, 'project_id':payload.project_id}
                 try:
+                    started = time.monotonic()
+                    log_event(question_logger, logging.INFO, 'questions', 'agent_started',
+                              request_id=request.state.request_id, project_id=payload.project_id)
                     # Previous answers may cite sources that have since been withdrawn.
                     safe_history = [{'question':turn['question'],
                                      'answer':turn['answer'] if library.history_is_current(turn.get('sources', [])) else ''}
@@ -238,11 +250,15 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                         sources = [(item['knowledge_id'], item['source_sha256']) for item in evidence]
                         conversations.finish(conversation_key, payload.question, result['message'], sources)
                         finished = True
-                    question_logger.info('guest_agent_completed request_id=%s project_id=%s reads=%s',
-                                         request.state.request_id, payload.project_id, len(evidence))
+                    log_event(question_logger, logging.INFO, 'questions', 'agent_completed',
+                              request_id=request.state.request_id, project_id=payload.project_id,
+                              evidence_count=len(evidence), duration_ms=round((time.monotonic() - started) * 1000, 2))
                     return result
                 except AgentError as exc:
-                    question_logger.warning('agent_answer_failed request_id=%s reason=%s', request.state.request_id, exc.reason)
+                    log_event(question_logger, logging.WARNING, 'questions', 'agent_failed',
+                              request_id=request.state.request_id, project_id=payload.project_id,
+                              reason=exc.reason if exc.reason in {'timeout', 'busy', 'context_limit', 'output_limit', 'invalid_response', 'invalid_citations', 'provider_error', 'provider_auth', 'provider_rate_limited', 'provider_unavailable', 'provider_network', 'runtime_unavailable'} else 'unknown',
+                              duration_ms=round((time.monotonic() - started) * 1000, 2))
                     # Preserve the existing verified, extractive fallback.
                     require_guest(request)
                     agent = None
@@ -271,7 +287,9 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                     generated = agent.answer(payload.question, result['evidence'], safe_history) if safe_history else agent.answer(payload.question, result['evidence'])
                     candidate = validate_answer(generated, len(result['evidence']))
                 except AgentError as exc:
-                    question_logger.warning('agent_answer_failed request_id=%s reason=%s', request.state.request_id, exc.reason)
+                    log_event(question_logger, logging.WARNING, 'questions', 'agent_failed',
+                              request_id=request.state.request_id, project_id=payload.project_id,
+                              reason=exc.reason if exc.reason in {'timeout', 'busy', 'context_limit', 'output_limit', 'invalid_response', 'invalid_citations', 'provider_error', 'provider_auth', 'provider_rate_limited', 'provider_unavailable', 'provider_network', 'runtime_unavailable'} else 'unknown')
                     result['agent_unavailable'] = True
                 require_guest(request)
                 try:
@@ -300,13 +318,10 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                 sources = [(item['knowledge_id'], item['source_sha256']) for item in result['evidence']]
                 conversations.finish(conversation_key, payload.question, result['message'], sources)
                 finished = True
-            question_logger.info(json.dumps({
-                'timestamp':datetime.now(timezone.utc).isoformat(), 'component':'questions',
-                'event':'guest_search_completed', 'request_id':request.state.request_id,
-                'project_id':payload.project_id, 'result':result['kind'],
-                'evidence_count':len(result['evidence']), 'search_limited':result['search_limited'],
-                'unavailable_sources':result['unavailable_sources'],
-            }, ensure_ascii=False))
+            log_event(question_logger, logging.INFO, 'questions', 'guest_search_completed',
+                      request_id=request.state.request_id, project_id=payload.project_id, result=result['kind'],
+                      evidence_count=len(result['evidence']), search_limited=result['search_limited'],
+                      unavailable_sources=result['unavailable_sources'])
             return result
         finally:
             if conversation_key and not finished:

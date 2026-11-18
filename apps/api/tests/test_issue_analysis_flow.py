@@ -147,3 +147,89 @@ def test_two_guests_cannot_enqueue_duplicate_analysis(tmp_path):
         with ThreadPoolExecutor(max_workers=2) as executor:
             statuses=list(executor.map(submit,(first,second)))
         assert sorted(statuses)==[202,409]
+
+
+def test_analysis_logs_lifecycle_with_safe_correlation(tmp_path, monkeypatch, caplog):
+    import json
+    import logging
+    from workbench.issues import analysis_worker
+    root = tmp_path / 'objects'
+    app = create_app(f'sqlite:///{tmp_path / "db.sqlite"}',dev_users={'owner':'password'},storage_root=root)
+    config = tmp_path / 'config.toml'
+    config.write_text(f'[analysis]\ncode_root="{tmp_path.as_posix()}"\n')
+    class FakeAgent:
+        def analyze(self, question, tools):
+            return {'answer':'secret report body','citations':[]}
+    monkeypatch.setattr(analysis_worker, 'load_agent', lambda _:FakeAgent())
+    with TestClient(app) as owner, TestClient(app) as guest:
+        csrf={'X-CSRF-Token':owner.post('/api/dev/session',json={'username':'owner','password':'password'}).json()['csrf_token']}
+        project=owner.post('/api/projects',headers=csrf,json={'name':'项目'}).json()['id']
+        guest.post('/api/guest/session')
+        issue=guest.post('/api/guest/issues',data={'project_id':project,'module':'模块','description':'secret issue body'},files={'log':('error.log',b'secret log body','text/plain')}).json()['id']
+        analysis_id=guest.post(f'/api/guest/issues/{issue}/analyze').json()['id']
+        with caplog.at_level(logging.INFO, logger='workbench.issue_analysis'):
+            assert analysis_worker.process_analysis_one(app.state.engine,root,config)
+    events=[json.loads(record.message) for record in caplog.records if record.name == 'workbench.issue_analysis']
+    assert [item['event'] for item in events] == ['analysis_started', 'analysis_finished']
+    assert all(item['analysis_id'] == analysis_id and item['issue_id'] == issue for item in events)
+    assert events[-1]['state'] == 'completed' and events[-1]['duration_ms'] >= 0
+    assert 'secret issue body' not in caplog.text and 'secret log body' not in caplog.text and 'secret report body' not in caplog.text
+
+
+def test_analysis_unexpected_failure_logs_safe_stack_and_state(tmp_path, monkeypatch, caplog):
+    import json
+    import logging
+    from workbench.issues import analysis_worker
+    root=tmp_path/'objects'
+    app=create_app(f'sqlite:///{tmp_path / "db.sqlite"}',dev_users={'owner':'password'},storage_root=root)
+    config=tmp_path/'settings.toml'
+    config.write_text(f'[analysis]\ncode_root="{tmp_path.as_posix()}"\n')
+    class BrokenAgent:
+        def analyze(self, question, tools):
+            raise RuntimeError('private-error-detail')
+    monkeypatch.setattr(analysis_worker,'load_agent',lambda _:BrokenAgent())
+    with TestClient(app) as owner, TestClient(app) as guest:
+        csrf={'X-CSRF-Token':owner.post('/api/dev/session',json={'username':'owner','password':'password'}).json()['csrf_token']}
+        project=owner.post('/api/projects',headers=csrf,json={'name':'项目'}).json()['id']
+        guest.post('/api/guest/session')
+        issue=guest.post('/api/guest/issues',data={'project_id':project,'module':'模块','description':'故障'},files={'log':('error.log',b'error','text/plain')}).json()['id']
+        request=guest.post(f'/api/guest/issues/{issue}/analyze')
+        with caplog.at_level(logging.INFO,logger='workbench.issue_analysis'):
+            analysis_worker.process_analysis_one(app.state.engine,root,config,'worker-id')
+        assert guest.get('/api/guest/issues').json()['items'][0]['analysis']['state'] == 'failed'
+    events=[json.loads(record.message) for record in caplog.records if record.name == 'workbench.issue_analysis']
+    failure=next(event for event in events if event['event'] == 'analysis_failed')
+    assert failure['request_id'] == request.headers['X-Request-ID'] and failure['worker_id'] == 'worker-id'
+    assert failure['error_type'] == 'RuntimeError' and any(frame['function'] == 'analyze' for frame in failure['frames'])
+    assert 'private-error-detail' not in caplog.text
+
+
+def test_stale_completion_is_logged_as_rejected_not_success(tmp_path, monkeypatch, caplog):
+    import json
+    import logging
+    from sqlalchemy import update
+    from sqlalchemy.orm import Session
+    from workbench.issues import analysis_worker
+    from workbench.issues.analysis_models import IssueAnalysis
+    root=tmp_path/'objects'
+    app=create_app(f'sqlite:///{tmp_path / "db.sqlite"}',dev_users={'owner':'password'},storage_root=root)
+    config=tmp_path/'settings.toml'
+    config.write_text(f'[analysis]\ncode_root="{tmp_path.as_posix()}"\n')
+    class StaleAgent:
+        def analyze(self, question, tools):
+            with Session(app.state.engine) as db, db.begin():
+                db.execute(update(IssueAnalysis).values(state='failed'))
+            return {'answer':'should not be saved','citations':[]}
+    monkeypatch.setattr(analysis_worker,'load_agent',lambda _:StaleAgent())
+    with TestClient(app) as owner, TestClient(app) as guest:
+        csrf={'X-CSRF-Token':owner.post('/api/dev/session',json={'username':'owner','password':'password'}).json()['csrf_token']}
+        project=owner.post('/api/projects',headers=csrf,json={'name':'项目'}).json()['id']
+        guest.post('/api/guest/session')
+        issue=guest.post('/api/guest/issues',data={'project_id':project,'module':'模块','description':'故障'},files={'log':('error.log',b'error','text/plain')}).json()['id']
+        guest.post(f'/api/guest/issues/{issue}/analyze')
+        with caplog.at_level(logging.INFO,logger='workbench.issue_analysis'):
+            analysis_worker.process_analysis_one(app.state.engine,root,config,'worker-id')
+    events=[json.loads(record.message)['event'] for record in caplog.records if record.name == 'workbench.issue_analysis']
+    assert 'analysis_completion_rejected' in events
+    assert 'analysis_finished' not in events
+    assert 'should not be saved' not in caplog.text

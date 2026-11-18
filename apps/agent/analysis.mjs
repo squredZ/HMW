@@ -4,7 +4,7 @@ import { createModels } from '@earendil-works/pi-ai'
 import { deepseekProvider } from '@earendil-works/pi-ai/providers/deepseek'
 import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
-import { budgetedStream, configureModel, requireProxySupport } from './model-config.mjs'
+import { budgetedStream, classifyModelFailure, configureModel, requireProxySupport } from './model-config.mjs'
 
 export async function runAnalysisAgent(input, model, streamFn, getApiKey, callTool) {
   let calls = 0
@@ -30,7 +30,7 @@ export async function runAnalysisAgent(input, model, streamFn, getApiKey, callTo
   if (contextExceeded) throw new Error('context_limit')
   const message=agent.state.messages.at(-1)
   if (message?.stopReason === 'length') throw new Error('output_limit')
-  if (message?.role !== 'assistant' || message.stopReason !== 'stop') throw new Error('agent_failed')
+  if (message?.role !== 'assistant' || message.stopReason !== 'stop') throw new Error(classifyModelFailure(message))
   const output=message.content.filter(item=>item.type === 'text').map(item=>item.text).join('')
   if (output.length > (input.settings?.max_answer_chars ?? 4000) * 6 + 2048) throw new Error('output_limit')
   try {
@@ -70,7 +70,7 @@ async function main() {
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch(error=>{
-    const reason = ['context_limit', 'output_limit', 'invalid_response'].includes(error?.message) ? error.message : 'provider_error'
+    const reason = ['context_limit', 'output_limit', 'invalid_response', 'provider_auth', 'provider_rate_limited', 'provider_unavailable', 'provider_network'].includes(error?.message) ? error.message : 'provider_error'
     process.stdout.write(JSON.stringify({type:'error', reason})+'\n')
     process.exitCode=1
   })

@@ -341,3 +341,35 @@ def test_context_overflow_crosses_agent_process_boundary():
                            'reasoning_effort':'off','max_context_bytes':1024}}
     with pytest.raises(AgentError, match='^context_limit$'):
         run_tool_process([node, str(script)], payload, dict(os.environ), None, timeout=5)
+
+
+def test_tool_logs_metadata_without_paths_arguments_or_contents(caplog):
+    import json
+    import logging
+    import os
+    import sys
+    from workbench.questions.agent import run_tool_process
+    class Evidence:
+        evidence = []
+    class Tools:
+        library = Evidence()
+        log_context = {'request_id':'request-1', 'analysis_id':'analysis-1'}
+        def list_resources(self, kind, path, offset):
+            return {}
+        def read_resource(self, kind, path, offset):
+            assert path == 'private-path'
+            return {'text':'private-file-content'}
+    script = '''
+import json, sys
+sys.stdin.readline()
+print(json.dumps({'type':'tool','name':'read_resource','args':{'kind':'code','path':'private-path','offset':0}}),flush=True)
+sys.stdin.readline()
+print(json.dumps({'type':'answer','answer':{'answer':'ok','citations':[]}}),flush=True)
+'''
+    with caplog.at_level(logging.INFO, logger='workbench.agent_tools'):
+        run_tool_process([sys.executable, '-u', '-c', script], {'settings':{}}, dict(os.environ), Tools(), timeout=5)
+    events = [json.loads(record.message) for record in caplog.records if record.name == 'workbench.agent_tools']
+    assert len(events) == 1 and events[0]['tool'] == 'read_resource'
+    assert events[0]['request_id'] == 'request-1' and events[0]['analysis_id'] == 'analysis-1'
+    assert events[0]['resource_type'] == 'code' and events[0]['result'] == 'completed'
+    assert 'private-path' not in caplog.text and 'private-file-content' not in caplog.text

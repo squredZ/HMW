@@ -1,11 +1,11 @@
 """Request-level diagnostics without recording input data or credentials."""
-import json
 import logging
-from datetime import datetime, timezone
 from time import monotonic
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from workbench.logging_utils import log_event, safe_exception_frames
 
 logger = logging.getLogger('workbench.request')
 
@@ -18,6 +18,7 @@ def install_request_logging(app: FastAPI) -> None:
         start = monotonic()
         status = 500
         error_type = None
+        frames = None
         try:
             response = await call_next(request)
             status = response.status_code
@@ -25,13 +26,12 @@ def install_request_logging(app: FastAPI) -> None:
             return response
         except Exception as exc:
             error_type = type(exc).__name__
-            raise
+            frames = safe_exception_frames(exc)
+            return JSONResponse({'detail':'Internal server error'}, status_code=500,
+                                headers={'X-Request-ID':request_id})
         finally:
             route = request.scope.get('route')
             event = {
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'component': 'api',
-                'event': 'http_request',
                 'request_id': request_id,
                 'method': request.method,
                 'route': getattr(route, 'path', '<unmatched>'),
@@ -40,4 +40,5 @@ def install_request_logging(app: FastAPI) -> None:
             }
             if error_type:
                 event['error_type'] = error_type
-            logger.log(logging.ERROR if status >= 500 else logging.INFO, json.dumps(event, ensure_ascii=False))
+                event['frames'] = frames
+            log_event(logger, logging.ERROR if status >= 500 else logging.INFO, 'api', 'http_request', **event)

@@ -118,3 +118,20 @@ test('context overflow is reported as a bounded protocol error', async () => {
   await assert.rejects(runExploringAgent({question:'测试',history:[{answer:'字'.repeat(3000)}],settings:{max_context_bytes:1024}},
     faux.getModel(),()=>{},()=> 'key',async ()=>{}), /context_limit/)
 })
+
+test('classifies provider failures without exposing their messages', async () => {
+  const {classifyModelFailure} = await import('../model-config.mjs')
+  assert.equal(classifyModelFailure({errorMessage:'HTTP 429 token secret-value'}), 'provider_rate_limited')
+  assert.equal(classifyModelFailure({errorMessage:'HTTP 401 key secret-value'}), 'provider_auth')
+  assert.equal(classifyModelFailure({errorMessage:'ECONNREFUSED secret-value'}), 'provider_network')
+  assert.equal(classifyModelFailure({errorMessage:'unexpected secret-value'}), 'provider_error')
+})
+
+test('returns a safe error category when the provider rejects a request', async () => {
+  const faux = fauxProvider()
+  const models = createModels()
+  models.setProvider(faux.provider)
+  faux.setResponses([fauxAssistantMessage('', {stopReason:'error', errorMessage:'HTTP 429 private-token'})])
+  await assert.rejects(runExploringAgent({question:'测试'}, faux.getModel(), models.streamSimple.bind(models),
+    ()=>'key', async ()=>{}), error => error.message === 'provider_rate_limited' && !error.message.includes('private-token'))
+})

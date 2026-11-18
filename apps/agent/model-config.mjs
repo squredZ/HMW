@@ -29,3 +29,12 @@ export function budgetedStream(stream, settings = {}, onLimit = () => {}) {
     return stream(model, context, {...options, maxTokens: outputTokens})
   }
 }
+
+export function classifyModelFailure(message) {
+  const detail = typeof message?.errorMessage === 'string' ? message.errorMessage : ''
+  if (/\b(?:401|403)\b/.test(detail)) return 'provider_auth'
+  if (/\b429\b/.test(detail)) return 'provider_rate_limited'
+  if (/\b(?:500|502|503|504)\b/.test(detail)) return 'provider_unavailable'
+  if (/\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN)\b/i.test(detail)) return 'provider_network'
+  return 'provider_error'
+}

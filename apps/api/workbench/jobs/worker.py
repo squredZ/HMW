@@ -1,8 +1,8 @@
 """Independent text-import worker; all results are fenced and transactional."""
 import hashlib
-import json
 import logging
 import os
+import signal
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +20,7 @@ from workbench.jobs.queue import JobQueue, StaleLease
 from workbench.knowledge.models import KnowledgeVersion, SourceVersion
 from workbench.knowledge.parsers.office import ParseBlocked, parse_office
 from workbench.projects.models import ProjectMember
+from workbench.logging_utils import configure_logging, log_event, safe_exception_frames
 
 logger = logging.getLogger('workbench.worker')
 
@@ -66,11 +67,17 @@ def process_one(engine: Engine, storage_root: Path, worker_id: str,
     with Session(engine) as db:
         job = db.get(Job, lease.job_id)
         requester_id, requester_project = job.payload['actor_id'], job.payload['project_id']
+        request_id = job.payload.get('request_id')
+        queued_at = job.created_at
         source = db.get(SourceVersion, job.payload['source_id'])
         membership = db.get(ProjectMember, (requester_project, requester_id))
         allowed = membership is not None and membership.role in ('owner', 'maintainer')
         source_data = (source.id, source.project_id, source.object_key, source.sha256, source.filename) if source else None
 
+    started = time.monotonic()
+    log_event(logger, logging.INFO, 'worker', 'import_started', job_id=lease.job_id,
+              project_id=requester_project, source_id=source_data[0] if source_data else None,
+              request_id=request_id, worker_id=worker_id, lease_token=lease.token, queue_wait_ms=max(0, round((time.time() - queued_at) * 1000, 2)))
     content = None
     if not allowed:
         state, result = 'failed', {'reason':'permission_revoked'}
@@ -101,11 +108,19 @@ def process_one(engine: Engine, storage_root: Path, worker_id: str,
         except UnicodeError:
             content, state, result = None, 'needs_input', {'reason':'encoding_unrecognized'}
         except StaleLease:
-            logger.warning('stale import lease during read; job_id=%s', lease.job_id)
+            log_event(logger, logging.WARNING, 'worker', 'import_stale_lease', job_id=lease.job_id,
+                      project_id=requester_project, request_id=request_id, worker_id=worker_id, lease_token=lease.token)
             return True
-        except OSError:
-            logger.exception('text import source read failed; job_id=%s', lease.job_id)
+        except OSError as exc:
+            log_event(logger, logging.ERROR, 'worker', 'import_source_failed', job_id=lease.job_id,
+                      project_id=requester_project, request_id=request_id, worker_id=worker_id,
+                      lease_token=lease.token, error_type=type(exc).__name__, frames=safe_exception_frames(exc))
             state, result = 'failed', {'reason':'source_unavailable'}
+        except Exception as exc:
+            log_event(logger, logging.ERROR, 'worker', 'import_unexpected_failure', job_id=lease.job_id,
+                      project_id=requester_project, request_id=request_id, worker_id=worker_id,
+                      lease_token=lease.token, error_type=type(exc).__name__, frames=safe_exception_frames(exc))
+            raise
 
     with Session(engine) as db, db.begin():
         # Lock membership through the fenced commit, so revocation and completion
@@ -120,39 +135,52 @@ def process_one(engine: Engine, storage_root: Path, worker_id: str,
         updated = db.execute(update(Job).where(*queue._owned(lease, finished_at.timestamp()))
                              .values(state=state, result=result, expires_at=None)).rowcount
         if updated != 1:
-            logger.warning('stale import completion discarded; job_id=%s', lease.job_id)
+            log_event(logger, logging.WARNING, 'worker', 'import_completion_rejected', job_id=lease.job_id,
+                      project_id=requester_project, request_id=request_id, worker_id=worker_id, lease_token=lease.token)
             return True
         if content is not None:
             db.add(KnowledgeVersion(id=result['knowledge_id'], source_id=source_id,
                                     project_id=project_id, content=content, state='draft',
                                     locator=locator))
-    logger.info(json.dumps({
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'component': 'worker', 'event': 'import_finished',
-        'job_id': lease.job_id, 'project_id': requester_project,
-        'state': state, 'reason': result.get('reason'),
-    }, ensure_ascii=False))
+    log_event(logger, logging.INFO, 'worker', 'import_finished', job_id=lease.job_id,
+              project_id=requester_project, source_id=source_data[0] if source_data else None,
+              request_id=request_id, worker_id=worker_id, lease_token=lease.token, state=state, reason=result.get('reason'), duration_ms=round((time.monotonic() - started) * 1000, 2))
     return True
 
 def main() -> None:
     from sqlalchemy import create_engine
     from workbench.db import Base
 
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    configure_logging('worker')
     database_url = os.environ.get('HMW_DATABASE_URL', 'sqlite:///./workbench-dev.db')
     root = Path(os.environ.get('HMW_STORAGE_ROOT', './workbench-objects'))
-    engine = create_engine(database_url)
-    Base.metadata.create_all(engine)
     worker_id = str(uuid4())
+    engine = None
+
+    def terminate(_signum, _frame):
+        raise KeyboardInterrupt
+
     try:
+        engine = create_engine(database_url)
+        Base.metadata.create_all(engine)
+        signal.signal(signal.SIGTERM, terminate)
+        log_event(logger, logging.INFO, 'worker', 'worker_started', worker_id=worker_id)
         while True:
             imported = process_one(engine, root, worker_id)
             config_path = os.environ.get('HMW_ANALYSIS_CONFIG_PATH')
-            analyzed = process_analysis_one(engine, root, Path(config_path) if config_path else None)
+            analyzed = process_analysis_one(engine, root, Path(config_path) if config_path else None, worker_id)
             if not imported and not analyzed:
                 time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    except Exception as exc:
+        log_event(logger, logging.ERROR, 'worker', 'worker_failed', worker_id=worker_id,
+                  error_type=type(exc).__name__, frames=safe_exception_frames(exc))
+        raise SystemExit(1) from None
     finally:
-        engine.dispose()
+        if engine is not None:
+            engine.dispose()
+        log_event(logger, logging.INFO, 'worker', 'worker_stopped', worker_id=worker_id)
 
 
 if __name__ == '__main__':

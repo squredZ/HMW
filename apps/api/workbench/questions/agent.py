@@ -1,5 +1,6 @@
 """Read-only Pi adapter; only bounded, authorized evidence crosses this boundary."""
 import json
+import logging
 import os
 import re
 import shutil
@@ -8,6 +9,10 @@ import threading
 import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from workbench.logging_utils import log_event
+
+tool_logger = logging.getLogger('workbench.agent_tools')
 
 
 class AgentError(Exception):
@@ -294,18 +299,21 @@ def run_tool_process(command: list[str], payload: dict, env: dict, library, *, t
                 raise AgentError('output_limit')
             if line is None:
                 raise AgentError('provider_error')
+            tool_started = time.monotonic()
+            is_tool, name, args, failure_reason = False, None, {}, None
             try:
                 message = json.loads(line)
                 if not isinstance(message, dict):
                     raise ValueError()
                 if message.get('type') == 'error':
                     reason = message.get('reason')
-                    raise AgentError(reason if reason in {'context_limit', 'output_limit', 'invalid_response'} else 'provider_error')
+                    raise AgentError(reason if reason in {'context_limit', 'output_limit', 'invalid_response', 'provider_auth', 'provider_rate_limited', 'provider_unavailable', 'provider_network'} else 'provider_error')
                 if message.get('type') == 'answer':
                     evidence = library.library.evidence if hasattr(library, 'list_resources') and library.library else library.evidence
                     return validate_answer(message.get('answer'), len(evidence), payload['settings'].get('max_answer_chars', 4000))
                 if message.get('type') != 'tool' or not isinstance(message.get('args'), dict):
                     raise ValueError()
+                is_tool = True
                 calls += 1
                 if calls > 30:
                     raise ValueError()
@@ -325,12 +333,30 @@ def run_tool_process(command: list[str], payload: dict, env: dict, library, *, t
                 # Only stable, non-sensitive decoder errors may reach the model.
                 allowed = {'RAR archive decoder unavailable (libarchive required)', 'RAR decoder timeout',
                            'invalid or unsupported RAR archive'}
+                reasons = {'RAR archive decoder unavailable (libarchive required)':'rar_decoder_unavailable',
+                           'RAR decoder timeout':'rar_decoder_timeout', 'invalid or unsupported RAR archive':'invalid_rar',
+                           'archive expansion limit':'archive_limit', 'resource unavailable':'resource_unavailable',
+                           'invalid path':'invalid_path', 'search entry limit':'search_limit'}
+                failure_reason = reasons.get(str(exc), 'invalid_request')
                 if hasattr(library, 'list_resources'):
                     response = {'result':{'error':str(exc) if str(exc) in allowed else 'resource unavailable'}}
                 else:
                     response = {'error':'invalid or unavailable tool request'}
             except (TypeError, KeyError, UnicodeError):
+                failure_reason = 'invalid_request'
                 response = {'error':'invalid or unavailable tool request'}
+            if is_tool:
+                known_tools = ('list_resources', 'read_resource', 'run_command', 'list_knowledge', 'read_knowledge')
+                safe_name = name if isinstance(name, str) and name in known_tools else 'unknown'
+                resource = args.get('kind') if isinstance(args, dict) else None
+                resource = resource if isinstance(resource, str) and resource in ('code', 'log', 'knowledge', 'skill') else None
+                command_name = args.get('command') if isinstance(args, dict) else None
+                command_name = command_name if isinstance(command_name, str) and command_name in ('pwd', 'ls', 'cat', 'rg') else None
+                failed = 'error' in response or (isinstance(response.get('result'), dict) and 'error' in response['result'])
+                log_event(tool_logger, logging.WARNING if failed else logging.INFO, 'agent_tools', 'tool_finished',
+                          **getattr(library, 'log_context', {}), tool=safe_name, resource_type=resource,
+                          command=command_name, result='failed' if failed else 'completed', reason=failure_reason,
+                          duration_ms=round((time.monotonic() - tool_started) * 1000, 2))
             process.stdin.write(json.dumps(response, ensure_ascii=False).encode('utf-8') + b'\n')
             process.stdin.flush()
     except (BrokenPipeError, OSError) as exc:

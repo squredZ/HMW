@@ -222,9 +222,14 @@ def test_worker_logs_job_result_without_file_content(tmp_path, caplog):
     app = create_app(f"sqlite:///{tmp_path / 'db.sqlite'}", testing=True, storage_root=root)
     with TestClient(app) as client:
         pid = client.post('/api/projects', headers=h('owner'), json={'name':'A'}).json()['id']
-        job = client.post(f'/api/projects/{pid}/imports', headers=h('owner'), files=[('files',('a.txt',b'private content','text/plain'))]).json()['jobs'][0]
+        response = client.post(f'/api/projects/{pid}/imports', headers=h('owner'), files=[('files',('a.txt',b'private content','text/plain'))])
+        job = response.json()['jobs'][0]
         with caplog.at_level(logging.INFO, logger='workbench.worker'):
             process_one(app.state.engine, root, 'worker')
+    import json
+    events = [json.loads(record.message) for record in caplog.records if record.name == 'workbench.worker']
+    assert [event['event'] for event in events] == ['import_started', 'import_finished']
+    assert all(event['request_id'] == response.headers['X-Request-ID'] and event['lease_token'] == 1 for event in events)
     assert job in caplog.text
     assert 'completed' in caplog.text
     assert 'private content' not in caplog.text
