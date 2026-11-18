@@ -314,3 +314,13 @@ def test_node_proxy_and_no_proxy_route_local_requests(tmp_path):
         for server in servers: server.shutdown()
         for thread in threads: thread.join()
         for server in servers: server.server_close()
+
+def test_exploring_agent_deadline_is_reported_as_timeout():
+    import os
+    import sys
+    import pytest
+    from workbench.questions.agent import AgentError, run_tool_process
+
+    with pytest.raises(AgentError, match='^timeout$'):
+        run_tool_process([sys.executable, '-c', 'import time; time.sleep(10)'],
+                         {'settings': {}}, dict(os.environ), None, timeout=0.1)

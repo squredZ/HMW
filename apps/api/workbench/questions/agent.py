@@ -249,7 +249,16 @@ def run_tool_process(command: list[str], payload: dict, env: dict, library, *, t
     threads = [threading.Thread(target=read_lines), threading.Thread(target=drain_errors)]
     for thread in threads:
         thread.start()
-    timer = threading.Timer(timeout, process.kill)
+    expired = threading.Event()
+
+    def stop_at_deadline():
+        expired.set()
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
+    timer = threading.Timer(timeout, stop_at_deadline)
     timer.start()
     try:
         initial = json.dumps(payload, ensure_ascii=False).encode('utf-8') + b'\n'
@@ -263,7 +272,11 @@ def run_tool_process(command: list[str], payload: dict, env: dict, library, *, t
                 line = messages.get(timeout=max(0.001, deadline - time.monotonic()))
             except queue.Empty as exc:
                 raise AgentError('timeout') from exc
-            if line is None or exceeded.is_set():
+            if expired.is_set() or time.monotonic() >= deadline:
+                raise AgentError('timeout')
+            if exceeded.is_set():
+                raise AgentError('output_limit')
+            if line is None:
                 raise AgentError('provider_error')
             try:
                 message = json.loads(line)
@@ -289,9 +302,10 @@ def run_tool_process(command: list[str], payload: dict, env: dict, library, *, t
             process.stdin.write(json.dumps(response, ensure_ascii=False).encode('utf-8') + b'\n')
             process.stdin.flush()
     except (BrokenPipeError, OSError) as exc:
-        raise AgentError('provider_error') from exc
+        raise AgentError('timeout' if expired.is_set() else 'provider_error') from exc
     finally:
         timer.cancel()
+        timer.join()
         if process.poll() is None:
             process.kill()
         process.wait()
