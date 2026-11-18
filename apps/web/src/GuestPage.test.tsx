@@ -80,3 +80,16 @@ it('lists projects for dialogue independently of the shared knowledge list', asy
   expect(screen.getByText('暂无分享的项目知识。')).toBeTruthy()
   expect(screen.queryByRole('button',{name:'问答项目'})).toBeNull()
 })
+
+it('offers all question projects when registering an issue', async () => {
+  vi.stubGlobal('fetch', vi.fn((url: string) => {
+    if (url === '/api/guest/status') return Promise.resolve(new Response('', {status:404}))
+    if (url === '/api/guest/question-projects') return Promise.resolve(new Response(JSON.stringify([{id:'p1',name:'未分享知识的项目'}])))
+    if (url === '/api/guest/issues') return Promise.resolve(new Response(JSON.stringify({items:[],has_more:false})))
+    return Promise.resolve(new Response(url === '/api/guest/projects' ? '[]' : '{}'))
+  }))
+  render(<GuestPage onOwnerLogin={()=>{}} />)
+  await screen.findByRole('option',{name:'未分享知识的项目'})
+  fireEvent.click(screen.getByRole('button',{name:'登记问题'}))
+  expect(screen.getByLabelText('问题所属项目').querySelector('option[value="p1"]')?.textContent).toBe('未分享知识的项目')
+})

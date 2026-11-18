@@ -73,6 +73,9 @@ def test_launcher_stops_children_when_a_service_exits(monkeypatch, tmp_path):
     assert spawned[2][1]['env']['HMW_API_PORT'] == '8010'
     assert spawned[0][1]['env']['HMW_CONFIG_PATH'] == str(config_path.resolve())
     assert 'HMW_CONFIG_PATH' not in spawned[1][1]['env']
+    assert spawned[1][1]['env']['HMW_ANALYSIS_CONFIG_PATH'] == str(config_path.resolve())
+    assert 'HMW_ANALYSIS_CONFIG_PATH' not in spawned[0][1]['env']
+    assert 'HMW_ANALYSIS_CONFIG_PATH' not in spawned[2][1]['env']
     assert 'HMW_CONFIG_PATH' not in spawned[2][1]['env']
 
 

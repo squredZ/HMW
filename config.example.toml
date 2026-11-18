@@ -28,3 +28,8 @@ proxy_mode = "direct"
 # https_proxy = "http://proxy.example:3128"
 # no_proxy = "localhost,127.0.0.1,.corp.example"
 # ca_file = "/path/to/company-ca.pem"
+
+# 分析 Agent 可只读访问的工程目录与可选技能目录。
+[analysis]
+code_root = ""
+skill_root = ""

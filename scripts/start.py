@@ -112,13 +112,17 @@ def run(config: dict, config_path: Path | None = None) -> int:
     shared_env['HMW_DATABASE_URL'] = f"sqlite:///{(API_ROOT / 'workbench-dev.db').as_posix()}"
     shared_env['HMW_STORAGE_ROOT'] = str(API_ROOT / 'workbench-objects')
     shared_env.pop('HMW_CONFIG_PATH', None)
+    shared_env.pop('HMW_ANALYSIS_CONFIG_PATH', None)
     api_env = {**shared_env, 'HMW_DEV_USERNAME':owner['username'], 'HMW_DEV_PASSWORD':owner['password']}
     if config_path is not None:
         api_env['HMW_CONFIG_PATH'] = str(config_path.resolve())
+    worker_env = shared_env.copy()
+    if config_path is not None:
+        worker_env['HMW_ANALYSIS_CONFIG_PATH'] = str(config_path.resolve())
     web_env = {**shared_env, 'HMW_API_PORT':str(server['api_port'])}
     commands = [
         ('API', [sys.executable, '-m', 'uvicorn', 'workbench.dev:app', '--host', '127.0.0.1', '--port', str(server['api_port']), '--no-access-log'], API_ROOT, api_env),
-        ('Worker', [sys.executable, '-m', 'workbench.jobs.worker'], API_ROOT, shared_env),
+        ('Worker', [sys.executable, '-m', 'workbench.jobs.worker'], API_ROOT, worker_env),
         ('Web', [node, str(vite), '--host', '127.0.0.1', '--port', str(server['web_port']), '--strictPort'], WEB_ROOT, web_env),
     ]
     children: list[tuple[str, subprocess.Popen]] = []

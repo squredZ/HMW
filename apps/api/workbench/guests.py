@@ -1,5 +1,7 @@
 """Read-only, short-lived guest access to explicitly shared owner content."""
 import json
+import hashlib
+import os
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -7,13 +9,17 @@ from secrets import token_urlsafe
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from starlette.datastructures import UploadFile
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from workbench.audit import record_audit
 from workbench.issues.models import Issue
+from workbench.issues.analysis_models import IssueAttachment, IssueAnalysis
 from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
 from workbench.knowledge.source_access import verified_download
 from workbench.projects.models import Project, ProjectMember
@@ -78,27 +84,123 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
         return {'kind':'guest'}
 
     @app.post('/api/guest/issues', status_code=201)
-    def submit_issue(payload: GuestIssue, request: Request):
+    async def submit_issue(request: Request):
         visitor_id = require_guest(request)
-        with Session(engine) as db, db.begin():
-            # Sharing changes lock the same membership row before the version.
-            membership = db.scalar(select(ProjectMember).where(ProjectMember.project_id == payload.project_id,
-                                   ProjectMember.user_id == owner_id).with_for_update())
-            if membership is None or membership.role not in ('owner', 'maintainer'):
+        upload = None
+        is_multipart = request.headers.get('content-type', '').lower().startswith('multipart/form-data')
+        if is_multipart:
+            form = await request.form()
+            project_id = str(form.get('project_id', '')).strip()
+            module = str(form.get('module', '')).strip()
+            description = str(form.get('description', '')).strip()
+            upload = form.get('log')
+            if (not project_id or len(project_id) > 64 or not module or len(module) > 200 or
+                not description or len(description) > 10000 or not isinstance(upload, UploadFile)):
+                raise HTTPException(422, 'Project, module, description and log are required')
+            name = upload.filename or ''
+            if not name or len(name) > 255 or name != Path(name).name or '\\' in name:
+                raise HTTPException(422, 'Invalid log filename')
+            title = description.splitlines()[0][:200]
+        else:
+            try:
+                payload = GuestIssue.model_validate(await request.json())
+            except (ValueError, ValidationError) as exc:
+                raise HTTPException(422, 'Invalid issue') from exc
+            project_id, title, description = payload.project_id, payload.title, payload.description
+
+        with Session(engine) as db:
+            project = db.scalar(select(Project.id).where(Project.id == project_id, Project.owner == owner_id))
+            if project is None:
                 raise HTTPException(404, 'Not found')
-            visible = db.scalar(select(Project.id).join(KnowledgeVersion, KnowledgeVersion.project_id == Project.id)
-                                .join(GuestPublication, GuestPublication.version_id == KnowledgeVersion.id)
-                                .where(Project.id == payload.project_id, Project.owner == owner_id,
-                                       KnowledgeVersion.state == 'published').limit(1))
-            if visible is None:
-                raise HTTPException(404, 'Not found')
-            issue_id = str(uuid4())
-            db.add(Issue(id=issue_id, project_id=payload.project_id, visitor_id=visitor_id,
-                         title=payload.title, description=payload.description, state='new',
-                         version=1, created_at=datetime.now(timezone.utc)))
-            record_audit(db, actor_id=visitor_id, action='issue.submitted', resource_id=issue_id,
-                         request_id=request.state.request_id, details={'project_id':payload.project_id})
-        return {'id':issue_id, 'state':'new'}
+            if not is_multipart:
+                visible = db.scalar(select(Project.id).join(KnowledgeVersion, KnowledgeVersion.project_id == Project.id)
+                                    .join(GuestPublication, GuestPublication.version_id == KnowledgeVersion.id)
+                                    .where(Project.id == project_id, Project.owner == owner_id,
+                                           KnowledgeVersion.state == 'published').limit(1))
+                if visible is None:
+                    raise HTTPException(404, 'Not found')
+        issue_id = str(uuid4())
+        path = None
+        committed = False
+        try:
+            if upload is not None:
+                object_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+                key = uuid4().hex
+                path = object_root / key
+                digest = hashlib.sha256()
+                size = 0
+                with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as output:
+                    while chunk := await upload.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > 10 * 1024 * 1024:
+                            raise HTTPException(413, 'Log exceeds size limit')
+                        digest.update(chunk)
+                        output.write(chunk)
+                if not size:
+                    raise HTTPException(422, 'Log is empty')
+            with Session(engine) as db, db.begin():
+                if not db.scalar(select(Project.id).where(Project.id == project_id, Project.owner == owner_id)):
+                    raise HTTPException(404, 'Not found')
+                db.add(Issue(id=issue_id, project_id=project_id, visitor_id=visitor_id, title=title,
+                             description=description, state='new', version=1, created_at=datetime.now(timezone.utc)))
+                if upload is not None:
+                    db.add(IssueAttachment(issue_id=issue_id, module=module, filename=name, object_key=key, sha256=digest.hexdigest()))
+                record_audit(db, actor_id=visitor_id, action='issue.submitted', resource_id=issue_id,
+                             request_id=request.state.request_id, details={'project_id':project_id})
+            committed = True
+            return {'id':issue_id, 'state':'new'}
+        finally:
+            if upload is not None:
+                await upload.close()
+            if path is not None and not committed:
+                path.unlink(missing_ok=True)
+
+    @app.get('/api/guest/issues')
+    def list_guest_issues(request: Request, limit: int = 50, offset: int = 0):
+        require_guest(request)
+        if not 1 <= limit <= 100 or offset < 0:
+            raise HTTPException(422, 'Invalid pagination')
+        with Session(engine) as db:
+            rows = db.execute(select(Issue, Project.name, IssueAttachment)
+                              .join(Project, Project.id == Issue.project_id)
+                              .outerjoin(IssueAttachment, IssueAttachment.issue_id == Issue.id)
+                              .where(Project.owner == owner_id)
+                              .order_by(Issue.created_at.desc(), Issue.id.desc()).offset(offset).limit(limit + 1)).all()
+            ids = [issue.id for issue, _, _ in rows[:limit]]
+            ranked = (select(IssueAnalysis.id,
+                             func.row_number().over(partition_by=IssueAnalysis.issue_id,
+                                                    order_by=(IssueAnalysis.created_at.desc(), IssueAnalysis.id.desc())).label('position'))
+                      .where(IssueAnalysis.issue_id.in_(ids)).subquery())
+            analyses = db.scalars(select(IssueAnalysis).join(ranked, ranked.c.id == IssueAnalysis.id)
+                                  .where(ranked.c.position == 1)).all()
+            latest = {analysis.issue_id:{'state':analysis.state, 'report':analysis.report, 'reason':analysis.reason}
+                      for analysis in analyses}
+            return {'items':[{'id':issue.id, 'project_id':issue.project_id, 'project_name':name,
+                              'module':attachment.module if attachment else '', 'description':issue.description,
+                              'log_filename':attachment.filename if attachment else '', 'state':issue.state,
+                              'analysis':latest.get(issue.id)} for issue, name, attachment in rows[:limit]],
+                    'has_more':len(rows) > limit}
+
+    @app.post('/api/guest/issues/{issue_id}/analyze', status_code=202)
+    def request_analysis(issue_id: str, request: Request):
+        visitor_id = require_guest(request)
+        job_id = str(uuid4())
+        try:
+            with Session(engine) as db, db.begin():
+                item = db.execute(select(Issue, IssueAttachment).join(Project, Project.id == Issue.project_id)
+                                  .outerjoin(IssueAttachment, IssueAttachment.issue_id == Issue.id)
+                                  .where(Issue.id == issue_id, Project.owner == owner_id)).first()
+                if item is None:
+                    raise HTTPException(404, 'Not found')
+                if item[1] is None:
+                    raise HTTPException(409, 'Issue has no log')
+                db.add(IssueAnalysis(id=job_id, issue_id=issue_id, state='queued',
+                                     created_at=datetime.now(timezone.utc).timestamp()))
+                record_audit(db, actor_id=visitor_id, action='issue.analysis.requested', resource_id=issue_id,
+                             request_id=request.state.request_id, details={'analysis_id':job_id})
+        except IntegrityError as exc:
+            raise HTTPException(409, 'Analysis already queued or running') from exc
+        return {'id':job_id, 'state':'queued'}
 
     @app.post('/api/guest/questions')
     def ask_question(payload: GuestQuestion, request: Request):

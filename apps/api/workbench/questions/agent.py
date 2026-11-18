@@ -187,6 +187,21 @@ class ReadonlyPiAgent:
         finally:
             self._slots.release()
 
+    def analyze(self, question: str, library) -> dict:
+        if not self._slots.acquire(blocking=False):
+            raise AgentError('busy')
+        try:
+            node = shutil.which('node')
+            if not node:
+                raise AgentError('runtime_unavailable')
+            payload = {'question':question, 'settings':self._settings}
+            return run_tool_process([node, '--max-old-space-size=128', str(self._script.with_name('analysis.mjs'))],
+                                    payload, self._agent_environment(), library,
+                                    timeout=self._settings['timeout_seconds'],
+                                    lock_fd=getattr(library, 'lock_fd', None))
+        finally:
+            self._slots.release()
+
 
 def load_agent(config_path: Path | None) -> ReadonlyPiAgent | None:
     if config_path is None:
@@ -202,13 +217,14 @@ def load_agent(config_path: Path | None) -> ReadonlyPiAgent | None:
     return ReadonlyPiAgent(settings, script, config.get('network'))
 
 
-def run_tool_process(command: list[str], payload: dict, env: dict, library, *, timeout: float = 90) -> dict:
+def run_tool_process(command: list[str], payload: dict, env: dict, library, *, timeout: float = 90, lock_fd: int | None = None) -> dict:
     """Exchange bounded JSON lines with the agent; kill it on timeout or protocol errors."""
     import queue
     import time
 
     try:
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        options = {'pass_fds': (lock_fd,)} if lock_fd is not None and os.name != 'nt' else {}
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, **options)
     except OSError as exc:
         raise AgentError('runtime_unavailable') from exc
     messages = queue.Queue(maxsize=32)
@@ -284,23 +300,36 @@ def run_tool_process(command: list[str], payload: dict, env: dict, library, *, t
                     raise ValueError()
                 if message.get('type') == 'error':
                     reason = message.get('reason')
-                    raise AgentError(reason if reason == 'context_limit' else 'provider_error')
+                    raise AgentError(reason if reason in {'context_limit', 'output_limit', 'invalid_response'} else 'provider_error')
                 if message.get('type') == 'answer':
-                    return validate_answer(message.get('answer'), len(library.evidence), payload['settings'].get('max_answer_chars', 4000))
+                    evidence = library.library.evidence if hasattr(library, 'list_resources') and library.library else library.evidence
+                    return validate_answer(message.get('answer'), len(evidence), payload['settings'].get('max_answer_chars', 4000))
                 if message.get('type') != 'tool' or not isinstance(message.get('args'), dict):
                     raise ValueError()
                 calls += 1
                 if calls > 30:
                     raise ValueError()
                 name, args = message.get('name'), message['args']
-                if name == 'list_knowledge' and set(args) == {'offset'}:
+                if name in ('list_resources', 'read_resource') and hasattr(library, name) and set(args) == {'kind', 'path', 'offset'}:
+                    result = getattr(library, name)(args['kind'], args['path'], args['offset'])
+                elif name == 'run_command' and hasattr(library, name) and set(args) == {'command', 'args'}:
+                    result = library.run_command(args['command'], args['args'])
+                elif name == 'list_knowledge' and set(args) == {'offset'}:
                     result = library.list_documents(args['offset'])
                 elif name == 'read_knowledge' and set(args) == {'id', 'offset'}:
                     result = library.read_document(args['id'], args['offset'])
                 else:
                     raise ValueError()
                 response = {'result':result}
-            except (ValueError, TypeError, KeyError, UnicodeError):
+            except ValueError as exc:
+                # Only stable, non-sensitive decoder errors may reach the model.
+                allowed = {'RAR archive decoder unavailable (libarchive required)', 'RAR decoder timeout',
+                           'invalid or unsupported RAR archive'}
+                if hasattr(library, 'list_resources'):
+                    response = {'result':{'error':str(exc) if str(exc) in allowed else 'resource unavailable'}}
+                else:
+                    response = {'error':'invalid or unavailable tool request'}
+            except (TypeError, KeyError, UnicodeError):
                 response = {'error':'invalid or unavailable tool request'}
             process.stdin.write(json.dumps(response, ensure_ascii=False).encode('utf-8') + b'\n')
             process.stdin.flush()

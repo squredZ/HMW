@@ -14,6 +14,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from workbench.jobs.models import Job
+from workbench.issues.analysis_models import IssueAnalysis, IssueAttachment
+from workbench.issues.analysis_worker import process_analysis_one
 from workbench.jobs.queue import JobQueue, StaleLease
 from workbench.knowledge.models import KnowledgeVersion, SourceVersion
 from workbench.knowledge.parsers.office import ParseBlocked, parse_office
@@ -144,7 +146,10 @@ def main() -> None:
     worker_id = str(uuid4())
     try:
         while True:
-            if not process_one(engine, root, worker_id):
+            imported = process_one(engine, root, worker_id)
+            config_path = os.environ.get('HMW_ANALYSIS_CONFIG_PATH')
+            analyzed = process_analysis_one(engine, root, Path(config_path) if config_path else None)
+            if not imported and not analyzed:
                 time.sleep(1)
     finally:
         engine.dispose()

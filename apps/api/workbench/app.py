@@ -20,6 +20,7 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from workbench.audit import record_audit
 from workbench.issues.models import Issue
+from workbench.issues.analysis_models import IssueAttachment, IssueAnalysis
 from workbench.issues.body_limit import IssueBodyLimit
 from workbench.db import Base
 from workbench.request_logging import install_request_logging
@@ -110,7 +111,7 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
     app.state.engine = engine
     object_root = Path(storage_root or os.environ.get("HMW_STORAGE_ROOT", "./workbench-objects"))
 
-    app.add_middleware(IssueBodyLimit)
+    app.add_middleware(IssueBodyLimit, max_bytes=10 * 1024 * 1024 + 128 * 1024)
     app.add_middleware(UploadLimitMiddleware, max_body_bytes=max_file_bytes * max_batch_files + 1024 * 1024)
     install_request_logging(app)
     sessions = SessionStore()
