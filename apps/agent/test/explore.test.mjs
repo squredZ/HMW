@@ -55,8 +55,7 @@ test('DeepSeek off mode explicitly disables thinking in the provider payload', a
   const {deepseekProvider}=await import('@earendil-works/pi-ai/providers/deepseek')
   const {configureModel}=await import('../model-config.mjs')
   const models=createModels(); models.setProvider(deepseekProvider())
-  const template=models.getModel('deepseek','deepseek-flash')
-  const model=configureModel(template,{model:'deepseek-v4-pro',api_url:'https://api.deepseek.com',max_output_tokens:2048,context_window_tokens:1048576})
+  const model=configureModel(models,{model:'deepseek-v4-pro',api_url:'https://api.deepseek.com',max_output_tokens:2048,context_window_tokens:1048576})
   let payload
   await assert.rejects(runExploringAgent({question:'你好',settings:{reasoning_effort:'off',max_output_tokens:2048}},model,(selected,context,options)=>models.streamSimple(selected,context,{...options,onPayload: body=>{payload=body;throw new Error('stop before network')}}),()=> 'key',async ()=>{}))
   assert.deepEqual(payload.thinking,{type:'disabled'})
@@ -76,7 +75,7 @@ for (const effort of ['low','high','max']) {
     const {deepseekProvider}=await import('@earendil-works/pi-ai/providers/deepseek')
     const {configureModel}=await import('../model-config.mjs')
     const models=createModels(); models.setProvider(deepseekProvider())
-    const model=configureModel(models.getModel('deepseek','deepseek-flash'),{model:'deepseek-v4-pro',api_url:'https://api.deepseek.com'})
+    const model=configureModel(models,{model:'deepseek-v4-pro',api_url:'https://api.deepseek.com'})
     let payload
     await assert.rejects(runExploringAgent({question:'你好',settings:{reasoning_effort:effort}},model,(selected,context,options)=>models.streamSimple(selected,context,{...options,onPayload:body=>{payload=body;throw new Error('stop before network')}}),()=> 'key',async ()=>{}))
     assert.deepEqual(payload.thinking,{type:'enabled'})
@@ -93,4 +92,29 @@ test('context byte budget is checked again after a knowledge tool result', async
     return models.streamSimple(model,context,options)
   },()=> 'key',async ()=>({number:1,text:'文'.repeat(3000),next_offset:null})))
   assert.equal(calls,1)
+})
+
+
+test('reserves output space in a small model window before calling the provider', async () => {
+  const faux = fauxProvider()
+  let calls = 0
+  const settings = {context_window_tokens: 4096, max_output_tokens: 2048, max_context_bytes: 200000}
+  await assert.rejects(runExploringAgent({question:'字'.repeat(1000), settings},
+    faux.getModel(), () => { calls++ }, () => 'key', async () => {}))
+  assert.equal(calls, 0)
+})
+
+test('V4 Pro uses its own model capabilities', async () => {
+  const {deepseekProvider} = await import('@earendil-works/pi-ai/providers/deepseek')
+  const {configureModel} = await import('../model-config.mjs')
+  const models = createModels()
+  models.setProvider(deepseekProvider())
+  const model = configureModel(models, {model:'deepseek-v4-pro', api_url:'https://api.deepseek.com'})
+  assert.deepEqual(model.input, ['text'])
+})
+
+test('context overflow is reported as a bounded protocol error', async () => {
+  const faux = fauxProvider()
+  await assert.rejects(runExploringAgent({question:'测试',history:[{answer:'字'.repeat(3000)}],settings:{max_context_bytes:1024}},
+    faux.getModel(),()=>{},()=> 'key',async ()=>{}), /context_limit/)
 })

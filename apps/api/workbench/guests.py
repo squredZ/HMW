@@ -145,6 +145,7 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                     require_guest(request)
                     agent = None
                     agent_failed = True
+                    agent_error = exc.reason if exc.reason in {'timeout', 'busy', 'context_limit'} else 'unavailable'
             else:
                 agent_failed = False
             search_query = payload.question
@@ -155,6 +156,8 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                                    priority_question=payload.question)
             if agent_failed:
                 result['agent_unavailable'] = True
+                result['agent_invoked'] = True
+                result['agent_error'] = agent_error
             if agent is not None and result['evidence']:
                 result['agent_invoked'] = True
                 candidate = None
