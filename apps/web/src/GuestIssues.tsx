@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { issueStateLabels } from './issueStates'
 
 type Project = { id: string; name: string }
 type Usage = { input: number; output: number; cache_read: number; cache_write: number; total: number; partial?: boolean }
@@ -138,7 +139,7 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
     {listError && <p role="status">{listError}</p>}
     {list && list.items.length === 0 && <p>暂无问题。</p>}
     {list?.items.map(issue => <article key={issue.id}><h3>{issue.project_name || issue.project_id || '未知项目'} · {issue.module || issue.title || '未填写模块'}</h3>
-      <p>{issue.description || '未填写问题现象'}</p><p>日志：{issue.log_filename || '无'} · 状态：{issue.state || '未知'}</p>
+      <p>{issue.description || '未填写问题现象'}</p><p>日志：{issue.log_filename || '无'} · 状态：{issueStateLabels[issue.state ?? ''] ?? '未知'}</p>
       {issue.analysis && <><p>分析状态：{issue.analysis.state === 'queued' ? '排队中' : issue.analysis.state === 'running' ? '分析中' : issue.analysis.state === 'failed' ? '分析失败' : issue.analysis.state === 'completed' ? '分析完成' : issue.analysis.state}</p>
         {issue.analysis.report && <pre>{issue.analysis.report}</pre>}{issue.analysis.state === 'failed' && <p>失败原因：{(issue.analysis.reason && analysisReasons.get(issue.analysis.reason)) || '分析失败，请联系负责人检查后重试。'}</p>}</>}
       {!issue.log_filename && <p>该问题没有日志，无法分析。</p>}

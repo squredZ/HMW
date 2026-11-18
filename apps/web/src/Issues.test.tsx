@@ -71,17 +71,20 @@ it('queues analysis and displays the resulting report after polling', async () =
   expect(fetcher.mock.calls[1][0]).toBe('/api/guest/issues/i1/analyze')
 })
 
-it('lets the owner review and resolve an issue', async () => {
+it('lets the owner transition an issue with a reason and version', async () => {
   const fetcher = vi.fn()
-    .mockResolvedValueOnce(new Response(JSON.stringify({items:[{id:'i1',project_name:'项目一',title:'接口异常',description:'请求失败',state:'new'}],has_more:false})))
-    .mockResolvedValueOnce(new Response(JSON.stringify({id:'i1',state:'resolved'})))
+    .mockResolvedValueOnce(new Response(JSON.stringify({items:[{id:'i1',project_name:'项目一',title:'接口异常',description:'请求失败',state:'new',version:1}],has_more:false})))
+    .mockResolvedValueOnce(new Response(JSON.stringify({id:'i1',state:'triaged',version:2})))
   vi.stubGlobal('fetch', fetcher)
   render(<OwnerIssues csrf="token" />)
   fireEvent.click(screen.getByRole('button',{name:'加载问题'}))
   await screen.findByText('请求失败')
-  fireEvent.click(screen.getByRole('button',{name:'标记已解决'}))
-  await screen.findByText('问题已标记为已解决。')
-  expect(fetcher.mock.calls[1][0]).toBe('/api/issues/i1/resolve')
+  fireEvent.change(screen.getByLabelText('处理说明'),{target:{value:'已完成分诊'}})
+  fireEvent.click(screen.getByRole('button',{name:'标记已分诊'}))
+  await screen.findByText('问题状态已更新。')
+  expect(fetcher.mock.calls[1][0]).toBe('/api/issues/i1/transition')
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({state:'triaged',reason:'已完成分诊',expected_version:1})
+  expect(screen.getByText('项目一 · 已分诊')).toBeTruthy()
 })
 
 it('shows analysis failures for older issues without optional fields', async () => {

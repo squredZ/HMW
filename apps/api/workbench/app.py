@@ -3,6 +3,7 @@
 The header-based identity provider exists exclusively in explicit test mode.
 Production requests are rejected until an approved identity provider is configured.
 """
+import logging
 import os
 from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from sqlalchemy.orm.exc import StaleDataError
 
 from workbench.audit import record_audit
+from workbench.logging_utils import log_event
 from workbench.issues.models import Issue
 from workbench.issues.analysis_models import IssueAttachment, IssueAnalysis
 from workbench.issues.body_limit import IssueBodyLimit
@@ -98,6 +100,25 @@ class LoginInput(BaseModel):
 class PublishInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_version: int
+
+
+class IssueTransitionInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    state: Literal['needs_info', 'triaged', 'in_progress', 'resolved', 'closed']
+    reason: str = Field(min_length=1, max_length=500)
+    expected_version: int = Field(ge=1)
+
+
+ISSUE_TRANSITIONS = {
+    'new': {'needs_info', 'triaged'},
+    'needs_info': {'triaged'},
+    'triaged': {'needs_info', 'in_progress'},
+    'in_progress': {'needs_info', 'resolved'},
+    'resolved': {'in_progress', 'closed'},
+    'closed': set(),
+}
+
+issue_logger = logging.getLogger('workbench.issues')
 
 
 def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = False, dev_users: dict[str, str] | None = None, storage_root: str | Path | None = None, max_file_bytes: int = 50 * 1024 * 1024, max_batch_files: int = 20) -> FastAPI:
@@ -330,9 +351,35 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
                               .where(Project.owner == user).order_by(Issue.created_at.desc(), Issue.id.desc())
                               .offset(offset).limit(limit + 1)).all()
             return {'items': [{'id':issue.id, 'project_id':issue.project_id, 'project_name':name,
-                               'title':issue.title, 'description':issue.description, 'state':issue.state,
+                               'title':issue.title, 'description':issue.description, 'state':issue.state, 'version':issue.version,
                                'created_at':issue.created_at.isoformat()} for issue, name in rows[:limit]],
                     'has_more':len(rows) > limit}
+
+    @app.post('/api/issues/{issue_id}/transition')
+    def transition_issue(issue_id: str, payload: IssueTransitionInput, request: Request,
+                         x_user_id: str | None = Header(default=None), x_principal_type: str | None = Header(default=None),
+                         x_csrf_token: str | None = Header(default=None)):
+        user = actor(request, x_user_id, x_principal_type, x_csrf_token, True)
+        with Session(engine) as db, db.begin():
+            issue = db.get(Issue, issue_id)
+            if issue is None or not db.scalar(select(Project.id).where(Project.id == issue.project_id, Project.owner == user)):
+                raise HTTPException(404, 'Not found')
+            old_state, project_id = issue.state, issue.project_id
+            if issue.version != payload.expected_version or payload.state not in ISSUE_TRANSITIONS.get(old_state, set()):
+                raise HTTPException(409, 'Invalid transition or version conflict')
+            changed = db.execute(update(Issue).where(Issue.id == issue_id, Issue.version == payload.expected_version,
+                                                      Issue.state == old_state)
+                                 .values(state=payload.state, version=Issue.version + 1)).rowcount
+            if changed != 1:
+                raise HTTPException(409, 'Version conflict')
+            version = payload.expected_version + 1
+            record_audit(db, actor_id=user, action='issue.transitioned', resource_id=issue_id,
+                         resource_version=version, request_id=request.state.request_id,
+                         details={'project_id':project_id, 'from_state':old_state,
+                                  'to_state':payload.state, 'reason':payload.reason})
+        log_event(issue_logger, logging.INFO, 'issues', 'issue_transitioned', request_id=request.state.request_id,
+                  project_id=project_id, issue_id=issue_id, from_state=old_state, to_state=payload.state, version=version)
+        return {'id':issue_id, 'state':payload.state, 'version':version}
 
     @app.post('/api/issues/{issue_id}/resolve')
     def resolve_issue(issue_id: str, request: Request, x_user_id: str | None = Header(default=None),
@@ -346,8 +393,12 @@ def create_app(database_url: str = "sqlite:///./workbench.db", testing: bool = F
                                  .values(state='resolved', version=Issue.version + 1)).rowcount
             if changed != 1:
                 raise HTTPException(409, 'Issue is not new')
+            project_id, version = issue.project_id, issue.version
             record_audit(db, actor_id=user, action='issue.resolved', resource_id=issue_id,
-                         request_id=request.state.request_id, details={'project_id':issue.project_id})
+                         resource_version=version, request_id=request.state.request_id,
+                         details={'project_id':project_id, 'from_state':'new', 'to_state':'resolved', 'reason':'legacy_resolve'})
+        log_event(issue_logger, logging.INFO, 'issues', 'issue_transitioned', request_id=request.state.request_id,
+                  project_id=project_id, issue_id=issue_id, from_state='new', to_state='resolved', version=version)
         return {'id':issue_id, 'state':'resolved'}
 
     install_knowledge_routes(app, engine, actor, object_root, max_file_bytes, max_batch_files)

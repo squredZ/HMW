@@ -196,6 +196,8 @@ PPT 架构图、状态机和图表保留原图。图像识别或 OCR 解释是�
 
 业务状态：new → needs_info → triaged → in_progress → resolved → closed。允许 needs_info → triaged，resolved → in_progress 重新打开；每次迁移记录 actor、reason、version。Agent 仅建议分类和下一步，不能自行认定问题解决或关闭。
 
+当前负责人界面可将新问题直接分诊或标记为需要补充信息；分诊和处理中也可以退回补充信息。流转需要填写说明并带上期望版本，冲突时刷新后重试；旧版直接将新问题标记为已解决的接口保留兼容。状态变化和说明记入审计，普通运行日志不记录说明内容。
+
 ### 7.3 三个任务模板
 
 | 模板 ID | 输入 | 输出 | 验证 |
