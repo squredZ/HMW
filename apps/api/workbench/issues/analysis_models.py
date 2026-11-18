@@ -1,5 +1,5 @@
 """Persistent issue attachments and manually requested analysis runs."""
-from sqlalchemy import Float, ForeignKey, Index, String, Text, text
+from sqlalchemy import JSON, Float, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from workbench.db import Base
@@ -27,3 +27,10 @@ class IssueAnalysis(Base):
     created_at: Mapped[float] = mapped_column(Float, nullable=False)
     report: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class IssueAnalysisUsage(Base):
+    __tablename__ = 'issue_analysis_usage'
+
+    analysis_id: Mapped[str] = mapped_column(ForeignKey('issue_analyses.id'), primary_key=True)
+    usage: Mapped[dict] = mapped_column(JSON, nullable=False)

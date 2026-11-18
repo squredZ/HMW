@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline'
 import { pathToFileURL } from 'node:url'
 import { budgetedStream, classifyModelFailure, configureModel, requireProxySupport } from './model-config.mjs'
 
-export async function runAnalysisAgent(input, model, streamFn, getApiKey, callTool) {
+export async function runAnalysisAgent(input, model, streamFn, getApiKey, callTool, onUsage = () => {}) {
   let calls = 0
   let contextExceeded = false
   const invoke = async (name, args) => {
@@ -26,6 +26,21 @@ export async function runAnalysisAgent(input, model, streamFn, getApiKey, callTo
     getApiKey, streamFn: budgetedStream((selected, context, options) =>
       streamFn(selected, context, {...options, onPayload: body => ({...body, response_format:{type:'json_object'}})}),
       input.settings, () => { contextExceeded = true })})
+  let usage = null
+  let partial = false
+  agent.subscribe(event => {
+    if (event.type !== 'message_end' || event.message.role !== 'assistant') return
+    const value = event.message.usage
+    const keys = ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']
+    if (!value || !keys.every(key => Number.isSafeInteger(value[key]) && value[key] >= 0) || value.totalTokens === 0) {
+      partial = true
+      if (usage) onUsage({...usage, partial:true})
+      return
+    }
+    const current = {input:value.input, output:value.output, cache_read:value.cacheRead, cache_write:value.cacheWrite, total:value.totalTokens}
+    usage = usage ? Object.fromEntries(Object.keys(current).map(key => [key, usage[key] + current[key]])) : current
+    onUsage({...usage, partial:true})
+  })
   await agent.prompt(JSON.stringify({question:input.question, history:input.history ?? []}))
   if (contextExceeded) throw new Error('context_limit')
   const message=agent.state.messages.at(-1)
@@ -39,6 +54,7 @@ export async function runAnalysisAgent(input, model, streamFn, getApiKey, callTo
         typeof result.answer === 'string' && result.citations === undefined && !/\[\d+\]/.test(result.answer)) {
       result.citations = []
     }
+    if (usage) onUsage({...usage, partial})
     return result
   } catch { throw new Error('invalid_response') }
 }
@@ -62,7 +78,7 @@ async function main() {
     const value=JSON.parse(response.value)
     if (value.error) throw new Error('tool_failed')
     return value.result
-    })
+    }, usage => process.stdout.write(JSON.stringify({type:'usage',usage})+'\n'))
   } finally {
     clearTimeout(timer)
   }

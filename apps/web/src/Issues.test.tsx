@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import GuestIssues from './GuestIssues'
 import OwnerIssues from './OwnerIssues'
 
@@ -28,6 +28,33 @@ it('submits a visitor issue with its required log and shows the shared list', as
   expect(body.get('module')).toBe('接口')
   expect(body.get('description')).toBe('请求失败')
   expect(body.get('log')).toBe(log)
+})
+
+it('reuses the submission key after a network failure and changes it when the issue changes', async () => {
+  const fetcher = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({items:[],has_more:false})))
+    .mockRejectedValueOnce(new TypeError('network'))
+    .mockRejectedValueOnce(new TypeError('network'))
+    .mockRejectedValueOnce(new TypeError('network'))
+  vi.stubGlobal('fetch', fetcher)
+  render(<GuestIssues projects={[{id:'p1',name:'项目一'}]} />)
+  await screen.findByText('暂无问题。')
+  fireEvent.change(screen.getByLabelText('问题所属项目'),{target:{value:'p1'}})
+  fireEvent.change(screen.getByLabelText('功能模块'),{target:{value:'接口'}})
+  fireEvent.change(screen.getByLabelText('问题现象'),{target:{value:'请求失败'}})
+  fireEvent.change(screen.getByLabelText('日志文件'),{target:{files:[new File(['x'],'app.log')]}})
+  fireEvent.click(screen.getByRole('button',{name:'提交问题'}))
+  await screen.findByText('网络异常，提交结果未知，请直接重试。')
+  fireEvent.click(screen.getByRole('button',{name:'提交问题'}))
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(3))
+  await screen.findByText('网络异常，提交结果未知，请直接重试。')
+  fireEvent.change(screen.getByLabelText('问题现象'),{target:{value:'新的问题'}})
+  fireEvent.click(screen.getByRole('button',{name:'提交问题'}))
+  await waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4))
+  const keys = fetcher.mock.calls.slice(1).map(call => call[1].headers['Idempotency-Key'])
+  expect(keys[0]).toMatch(/^[\da-f-]{36}$/)
+  expect(keys[1]).toBe(keys[0])
+  expect(keys[2]).not.toBe(keys[0])
 })
 
 it('queues analysis and displays the resulting report after polling', async () => {
@@ -122,4 +149,17 @@ it('explains analysis failures without exposing internal reason codes', async ()
     expect(screen.getByText(`失败原因：${message}`)).toBeTruthy()
   }
   expect(screen.queryByText(/unexpected_code/)).toBeNull()
+})
+
+it('shows paginated analysis usage and unknown historical usage', async () => {
+  vi.stubGlobal('fetch', vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({items:[{id:'i1',description:'问题',analysis:{id:'a2',state:'completed'}}],has_more:false})))
+    .mockResolvedValueOnce(new Response(JSON.stringify({items:[{id:'a2',state:'completed',created_at:100,usage:{input:10,output:5,cache_read:2,cache_write:0,total:17}},{id:'a1',state:'failed',created_at:90,usage:null}],has_more:true})))
+    .mockResolvedValueOnce(new Response(JSON.stringify({items:[{id:'a0',state:'completed',created_at:80,usage:null}],has_more:false}))))
+  render(<GuestIssues projects={[]} />)
+  fireEvent.click(await screen.findByRole('button',{name:'查看分析记录'}))
+  expect(await screen.findByText(/总计 17/)).toBeTruthy()
+  expect(screen.getByText('Token 用量：未知')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button',{name:'分析记录下一页'}))
+  expect(await screen.findByText('第 2 页分析记录')).toBeTruthy()
 })

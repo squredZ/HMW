@@ -1,7 +1,8 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 
 type Project = { id: string; name: string }
-type Analysis = { state: string; report?: string | null; reason?: string | null }
+type Usage = { input: number; output: number; cache_read: number; cache_write: number; total: number; partial?: boolean }
+type Analysis = { id?: string; state: string; report?: string | null; reason?: string | null; usage?: Usage | null; created_at?: number }
 type Issue = { id: string; project_id?: string; project_name?: string; module?: string | null; title?: string | null; description?: string | null; log_filename?: string | null; state?: string; analysis?: Analysis | null }
 type IssueList = { items: Issue[]; has_more: boolean }
 
@@ -17,6 +18,41 @@ const analysisReasons = new Map<string, string>([
 
 const isActive = (analysis?: Analysis | null) => analysis?.state === 'queued' || analysis?.state === 'running'
 
+function submissionKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 15) | 64
+  bytes[8] = (bytes[8] & 63) | 128
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`
+}
+
+function AnalysisHistory({ issueId }: { issueId: string }) {
+  const [open, setOpen] = useState(false)
+  const [page, setPage] = useState(0)
+  const [result, setResult] = useState<{items: Analysis[]; has_more: boolean} | null>(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    if (!open) return
+    const controller = new AbortController()
+    setResult(null); setError('')
+    void fetch(`/api/guest/issues/${encodeURIComponent(issueId)}/analyses?limit=20&offset=${page * 20}`, {credentials:'same-origin', signal:controller.signal})
+      .then(response => { if (!response.ok) throw new Error(); return response.json() })
+      .then(value => { if (!controller.signal.aborted) setResult(value) })
+      .catch(() => { if (!controller.signal.aborted) setError('分析记录加载失败，请关闭后重试。') })
+    return () => controller.abort()
+  }, [issueId, open, page])
+  return <div><button type="button" className="secondary" onClick={() => setOpen(value => !value)}>{open ? '收起分析记录' : '查看分析记录'}</button>
+    {open && <div>{error && <p role="status">{error}</p>}{result && <>
+      {result.items.map(item => <div key={item.id}><p>分析时间：{item.created_at != null ? new Date(item.created_at * 1000).toLocaleString() : '未知'} · 状态：{item.state}</p>
+        <p>{item.usage ? `Token 用量${item.usage.partial ? '（部分用量，至少）' : ''}：输入 ${item.usage.input}，输出 ${item.usage.output}，缓存读取 ${item.usage.cache_read}，缓存写入 ${item.usage.cache_write}，总计 ${item.usage.total}` : 'Token 用量：未知'}</p>
+        {item.report && <pre>{item.report}</pre>}</div>)}
+      <button type="button" disabled={page === 0} onClick={() => setPage(value => value - 1)}>分析记录上一页</button>
+      <span>第 {page + 1} 页分析记录</span>
+      <button type="button" disabled={!result.has_more} onClick={() => setPage(value => value + 1)}>分析记录下一页</button>
+    </>}</div>}
+  </div>
+}
+
 export default function GuestIssues({ projects }: { projects: Project[] }) {
   const [project, setProject] = useState('')
   const [module, setModule] = useState('')
@@ -31,6 +67,8 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
   const [list, setList] = useState<IssueList | null>(null)
   const [page, setPage] = useState(0)
   const request = useRef<AbortController | null>(null)
+  const submission = useRef<{key:string; project:string; module:string; description:string; log:File} | null>(null)
+  const submitting = useRef(false)
 
   const loadIssues = useCallback(async () => {
     request.current?.abort()
@@ -59,16 +97,24 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!projects.some(item => item.id === project) || !module.trim() || !description.trim() || !log) return
+    if (submitting.current || !projects.some(item => item.id === project) || !module.trim() || !description.trim() || !log) return
+    const current = submission.current
+    if (!current || current.project !== project || current.module !== module.trim() ||
+        current.description !== description.trim() || current.log !== log) {
+      submission.current = {key:submissionKey(), project, module:module.trim(), description:description.trim(), log}
+    }
+    submitting.current = true
     setBusy(true); setMessage('')
     try {
       const body = new FormData()
       body.append('project_id', project); body.append('module', module.trim()); body.append('description', description.trim()); body.append('log', log)
-      const response = await fetch('/api/guest/issues', {method:'POST', credentials:'same-origin', body})
+      const response = await fetch('/api/guest/issues', {method:'POST', credentials:'same-origin', headers:{'Idempotency-Key':submission.current!.key}, body})
       if (!response.ok) throw new Error(response.status === 401 ? '临时会话已失效，请刷新页面。' : response.status === 413 ? '日志文件不能超过 10 MB。' : response.status === 409 ? '提交发生冲突，请刷新页面后重试。' : '提交失败，请确认项目仍可访问后重试。')
+      submission.current = null
       setModule(''); setDescription(''); setLog(null); setFileKey(value => value + 1); setMessage('问题已提交。')
       await loadIssues()
-    } catch (error) { setMessage((error as Error).message) } finally { setBusy(false) }
+    } catch (error) { setMessage(error instanceof TypeError ? '网络异常，提交结果未知，请直接重试。' : (error as Error).message) }
+    finally { submitting.current = false; setBusy(false) }
   }
 
   async function analyze(id: string) {
@@ -97,6 +143,7 @@ export default function GuestIssues({ projects }: { projects: Project[] }) {
         {issue.analysis.report && <pre>{issue.analysis.report}</pre>}{issue.analysis.state === 'failed' && <p>失败原因：{(issue.analysis.reason && analysisReasons.get(issue.analysis.reason)) || '分析失败，请联系负责人检查后重试。'}</p>}</>}
       {!issue.log_filename && <p>该问题没有日志，无法分析。</p>}
       <button type="button" className="secondary" disabled={analyzing !== null || isActive(issue.analysis) || !issue.log_filename} onClick={()=>void analyze(issue.id)}>分析问题</button>
+      {issue.analysis && <AnalysisHistory issueId={issue.id} />}
     </article>)}
     <div className="actions"><button type="button" className="secondary" disabled={page === 0 || busy || analyzing !== null} onClick={()=>{setList(null); setPage(value => value - 1)}}>上一页</button><span>第 {page + 1} 页</span><button type="button" className="secondary" disabled={!list?.has_more || busy || analyzing !== null} onClick={()=>{setList(null); setPage(value => value + 1)}}>下一页</button></div>
   </section>

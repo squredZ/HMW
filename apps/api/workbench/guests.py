@@ -1,7 +1,11 @@
 """Read-only, short-lived guest access to explicitly shared owner content."""
+import asyncio
 import hashlib
+import json
 import os
 import logging
+import queue
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +13,7 @@ from secrets import token_urlsafe
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from starlette.datastructures import UploadFile
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
@@ -19,8 +24,8 @@ from sqlalchemy.orm import Session
 
 from workbench.audit import record_audit
 from workbench.logging_utils import log_event
-from workbench.issues.models import Issue
-from workbench.issues.analysis_models import IssueAttachment, IssueAnalysis
+from workbench.issues.models import Issue, IssueSubmission
+from workbench.issues.analysis_models import IssueAttachment, IssueAnalysis, IssueAnalysisUsage
 from workbench.knowledge.models import GuestPublication, KnowledgeVersion, SourceVersion
 from workbench.knowledge.source_access import verified_download
 from workbench.projects.models import Project, ProjectMember
@@ -88,6 +93,16 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
     @app.post('/api/guest/issues', status_code=201)
     async def submit_issue(request: Request):
         visitor_id = require_guest(request)
+        retry_key = request.headers.get('idempotency-key')
+        key_digest = None
+        if retry_key is not None:
+            try:
+                if len(retry_key) > 36:
+                    raise ValueError('key too long')
+                retry_key = str(UUID(retry_key))
+            except (ValueError, AttributeError) as exc:
+                raise HTTPException(422, 'Invalid idempotency key') from exc
+            key_digest = hashlib.sha256(retry_key.encode('ascii')).hexdigest()
         upload = None
         is_multipart = request.headers.get('content-type', '').lower().startswith('multipart/form-data')
         if is_multipart:
@@ -140,15 +155,38 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                         output.write(chunk)
                 if not size:
                     raise HTTPException(422, 'Log is empty')
-            with Session(engine) as db, db.begin():
-                if not db.scalar(select(Project.id).where(Project.id == project_id, Project.owner == owner_id)):
-                    raise HTTPException(404, 'Not found')
-                db.add(Issue(id=issue_id, project_id=project_id, visitor_id=visitor_id, title=title,
-                             description=description, state='new', version=1, created_at=datetime.now(timezone.utc)))
-                if upload is not None:
-                    db.add(IssueAttachment(issue_id=issue_id, module=module, filename=name, object_key=key, sha256=digest.hexdigest()))
-                record_audit(db, actor_id=visitor_id, action='issue.submitted', resource_id=issue_id,
-                             request_id=request.state.request_id, details={'project_id':project_id})
+            fingerprint = {'project_id':project_id, 'title':title, 'description':description,
+                           'module':module if upload is not None else None,
+                           'filename':name if upload is not None else None,
+                           'file_sha256':digest.hexdigest() if upload is not None else None}
+            payload_digest = hashlib.sha256(json.dumps(fingerprint, ensure_ascii=False, sort_keys=True,
+                                                       separators=(',', ':')).encode('utf-8')).hexdigest()
+            try:
+                with Session(engine) as db, db.begin():
+                    if not db.scalar(select(Project.id).where(Project.id == project_id, Project.owner == owner_id)):
+                        raise HTTPException(404, 'Not found')
+                    db.add(Issue(id=issue_id, project_id=project_id, visitor_id=visitor_id, title=title,
+                                 description=description, state='new', version=1, created_at=datetime.now(timezone.utc)))
+                    if upload is not None:
+                        db.add(IssueAttachment(issue_id=issue_id, module=module, filename=name, object_key=key, sha256=digest.hexdigest()))
+                    if key_digest:
+                        db.add(IssueSubmission(visitor_id=visitor_id, key_digest=key_digest,
+                                               payload_digest=payload_digest, issue_id=issue_id))
+                    record_audit(db, actor_id=visitor_id, action='issue.submitted', resource_id=issue_id,
+                                 request_id=request.state.request_id, details={'project_id':project_id})
+            except IntegrityError:
+                if key_digest is None:
+                    raise
+                with Session(engine) as db:
+                    existing = db.get(IssueSubmission, (visitor_id, key_digest))
+                    if existing is None:
+                        raise
+                    if existing.payload_digest != payload_digest:
+                        raise HTTPException(409, 'Idempotency key already used for a different issue')
+                    original_id = existing.issue_id
+                log_event(issue_logger, logging.INFO, 'issues', 'issue_submission_replayed',
+                          request_id=request.state.request_id, project_id=project_id, issue_id=original_id)
+                return {'id':original_id, 'state':'new'}
             committed = True
             log_event(issue_logger, logging.INFO, 'issues', 'issue_submitted',
                       request_id=request.state.request_id, project_id=project_id, issue_id=issue_id,
@@ -176,14 +214,35 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                              func.row_number().over(partition_by=IssueAnalysis.issue_id,
                                                     order_by=(IssueAnalysis.created_at.desc(), IssueAnalysis.id.desc())).label('position'))
                       .where(IssueAnalysis.issue_id.in_(ids)).subquery())
-            analyses = db.scalars(select(IssueAnalysis).join(ranked, ranked.c.id == IssueAnalysis.id)
+            analyses = db.execute(select(IssueAnalysis, IssueAnalysisUsage.usage)
+                                  .join(ranked, ranked.c.id == IssueAnalysis.id)
+                                  .outerjoin(IssueAnalysisUsage, IssueAnalysisUsage.analysis_id == IssueAnalysis.id)
                                   .where(ranked.c.position == 1)).all()
-            latest = {analysis.issue_id:{'state':analysis.state, 'report':analysis.report, 'reason':analysis.reason}
-                      for analysis in analyses}
+            latest = {analysis.issue_id:{'id':analysis.id, 'state':analysis.state, 'report':analysis.report,
+                                         'reason':analysis.reason, 'usage':usage}
+                      for analysis, usage in analyses}
             return {'items':[{'id':issue.id, 'project_id':issue.project_id, 'project_name':name,
                               'module':attachment.module if attachment else '', 'description':issue.description,
                               'log_filename':attachment.filename if attachment else '', 'state':issue.state,
                               'analysis':latest.get(issue.id)} for issue, name, attachment in rows[:limit]],
+                    'has_more':len(rows) > limit}
+
+    @app.get('/api/guest/issues/{issue_id}/analyses')
+    def list_issue_analyses(issue_id: str, request: Request, limit: int = 20, offset: int = 0):
+        require_guest(request)
+        if not 1 <= limit <= 100 or offset < 0:
+            raise HTTPException(422, 'Invalid pagination')
+        with Session(engine) as db:
+            if not db.scalar(select(Issue.id).join(Project, Project.id == Issue.project_id)
+                             .where(Issue.id == issue_id, Project.owner == owner_id)):
+                raise HTTPException(404, 'Not found')
+            rows = db.execute(select(IssueAnalysis, IssueAnalysisUsage.usage)
+                              .outerjoin(IssueAnalysisUsage, IssueAnalysisUsage.analysis_id == IssueAnalysis.id)
+                              .where(IssueAnalysis.issue_id == issue_id)
+                              .order_by(IssueAnalysis.created_at.desc(), IssueAnalysis.id.desc())
+                              .offset(offset).limit(limit + 1)).all()
+            return {'items':[{'id':run.id, 'state':run.state, 'report':run.report, 'reason':run.reason,
+                              'created_at':run.created_at, 'usage':usage} for run, usage in rows[:limit]],
                     'has_more':len(rows) > limit}
 
     @app.post('/api/guest/issues/{issue_id}/analyze', status_code=202)
@@ -210,8 +269,7 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                   request_id=request.state.request_id, issue_id=issue_id, analysis_id=job_id, project_id=project_id)
         return {'id':job_id, 'state':'queued'}
 
-    @app.post('/api/guest/questions')
-    def ask_question(payload: GuestQuestion, request: Request):
+    def answer_question(payload: GuestQuestion, request: Request, progress=None, cancelled=None):
         visitor = require_guest(request)
         agent = getattr(app.state, 'answer_agent', None)
         conversation_key = (visitor, payload.project_id, str(payload.conversation_id)) if payload.conversation_id else None
@@ -226,6 +284,15 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
             if agent is not None and hasattr(agent, 'explore'):
                 library = ProjectLibrary(engine, owner_id, payload.project_id, object_root, max_file_bytes)
                 library.log_context = {'request_id':request.state.request_id, 'project_id':payload.project_id}
+                library.cancelled = cancelled
+                if progress:
+                    # Report only the operation, never the knowledge contents or tool arguments.
+                    for name in ('list_documents', 'read_document'):
+                        original = getattr(library, name)
+                        def report_read(*args, _original=original, **kwargs):
+                            progress('reading')
+                            return _original(*args, **kwargs)
+                        setattr(library, name, report_read)
                 try:
                     started = time.monotonic()
                     log_event(question_logger, logging.INFO, 'questions', 'agent_started',
@@ -234,7 +301,13 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                     safe_history = [{'question':turn['question'],
                                      'answer':turn['answer'] if library.history_is_current(turn.get('sources', [])) else ''}
                                     for turn in history]
+                    if progress:
+                        progress('thinking')
                     generated = agent.explore(payload.question, safe_history, library)
+                    if cancelled and cancelled.is_set():
+                        raise AgentError('cancelled')
+                    if progress:
+                        progress('answering')
                     require_guest(request)
                     library.verify_catalog()
                     if any(turn['answer'] and not library.history_is_current(original.get('sources', []))
@@ -255,6 +328,8 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
                               evidence_count=len(evidence), duration_ms=round((time.monotonic() - started) * 1000, 2))
                     return result
                 except AgentError as exc:
+                    if cancelled and cancelled.is_set():
+                        raise
                     log_event(question_logger, logging.WARNING, 'questions', 'agent_failed',
                               request_id=request.state.request_id, project_id=payload.project_id,
                               reason=exc.reason if exc.reason in {'timeout', 'busy', 'context_limit', 'output_limit', 'invalid_response', 'invalid_citations', 'provider_error', 'provider_auth', 'provider_rate_limited', 'provider_unavailable', 'provider_network', 'runtime_unavailable'} else 'unknown',
@@ -326,6 +401,64 @@ def install_guest_routes(app: FastAPI, engine: Engine, dev_users: dict[str, str]
         finally:
             if conversation_key and not finished:
                 conversations.abort(conversation_key)
+
+    @app.post('/api/guest/questions')
+    def ask_question(payload: GuestQuestion, request: Request):
+        return answer_question(payload, request)
+
+    @app.post('/api/guest/questions/stream')
+    def stream_question(payload: GuestQuestion, request: Request):
+        require_guest(request)
+        events = queue.Queue(maxsize=64)
+        cancelled = threading.Event()
+
+        def progress(stage):
+            try:
+                events.put_nowait({'type':'progress', 'stage':stage})
+            except queue.Full:
+                pass  # Progress is advisory; never block the agent or drop its final result.
+
+        def run():
+            try:
+                event = {'type':'result', 'data':answer_question(payload, request, progress, cancelled)}
+            except HTTPException as exc:
+                event = {'type':'error', 'message':{401:'访客会话已过期，请刷新页面。', 404:'项目不存在。',
+                                                     409:'对话或知识状态发生变化，请重试。'}.get(exc.status_code, '问答失败，请重试。')}
+            except Exception as exc:
+                if cancelled.is_set():
+                    return
+                log_event(question_logger, logging.ERROR, 'questions', 'stream_failed',
+                          request_id=request.state.request_id, project_id=payload.project_id,
+                          error_type=type(exc).__name__)
+                event = {'type':'error', 'message':'问答失败，请重试。'}
+            while not cancelled.is_set():
+                try:
+                    events.put(event, timeout=0.2)
+                    return
+                except queue.Full:
+                    continue
+
+        async def generate():
+            worker = threading.Thread(target=run, daemon=True, name='question-stream')
+            worker.start()
+            last_heartbeat = time.monotonic()
+            try:
+                while True:
+                    try:
+                        event = await asyncio.to_thread(events.get, True, 1)
+                    except queue.Empty:
+                        if time.monotonic() - last_heartbeat >= 15:
+                            last_heartbeat = time.monotonic()
+                            yield ': keepalive\n\n'
+                        continue
+                    yield 'data: ' + json.dumps(event, ensure_ascii=False) + '\n\n'
+                    if event['type'] in ('result', 'error'):
+                        return
+            finally:
+                cancelled.set()
+
+        return StreamingResponse(generate(), media_type='text/event-stream',
+                                 headers={'X-Accel-Buffering':'no', 'Cache-Control':'no-store'})
 
     @app.get('/api/guest/status')
     def guest_status(request: Request):

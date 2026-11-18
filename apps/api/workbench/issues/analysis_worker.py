@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
-from workbench.issues.analysis_models import IssueAnalysis, IssueAttachment
+from workbench.issues.analysis_models import IssueAnalysis, IssueAnalysisUsage, IssueAttachment
 from workbench.issues.models import Issue
 from workbench.projects.models import Project
 from workbench.questions.agent import AgentError, load_agent
@@ -107,6 +107,7 @@ def process_analysis_one(engine, storage_root: Path, config_path: Path | None, w
         log_event(logger, logging.INFO, 'issue_analysis', 'analysis_started', analysis_id=run_id,
                   issue_id=issue_id, request_id=request_id, worker_id=worker_id, queue_wait_ms=max(0, round((time.time() - queued_at) * 1000, 2)))
         project_id = None
+        tools = None
         try:
             with Session(engine) as db:
                 row = db.execute(select(Issue, IssueAttachment, Project)
@@ -176,6 +177,15 @@ def process_analysis_one(engine, storage_root: Path, config_path: Path | None, w
             with Session(engine) as db, db.begin():
                 updated = db.execute(update(IssueAnalysis).where(IssueAnalysis.id == run_id, IssueAnalysis.state == 'running')
                                      .values(state=state, report=report, reason=reason)).rowcount
+                usage = getattr(tools, 'token_usage', None)
+                if updated == 1 and usage is not None:
+                    if state == 'failed':
+                        usage = {**usage, 'partial': True}
+                    existing = db.get(IssueAnalysisUsage, run_id)
+                    if existing is None:
+                        db.add(IssueAnalysisUsage(analysis_id=run_id, usage=usage))
+                    else:
+                        existing.usage = usage
         except Exception as exc:
             log_event(logger, logging.ERROR, 'issue_analysis', 'analysis_completion_failed', analysis_id=run_id,
                       issue_id=issue_id, project_id=project_id, request_id=request_id, worker_id=worker_id,

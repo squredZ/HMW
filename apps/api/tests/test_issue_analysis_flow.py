@@ -233,3 +233,48 @@ def test_stale_completion_is_logged_as_rejected_not_success(tmp_path, monkeypatc
     assert 'analysis_completion_rejected' in events
     assert 'analysis_finished' not in events
     assert 'should not be saved' not in caplog.text
+
+
+def test_analysis_persists_partial_usage_on_failure(tmp_path, monkeypatch):
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+    from workbench.issues import analysis_worker
+    from workbench.issues.analysis_models import IssueAnalysis, IssueAnalysisUsage
+    from workbench.questions.agent import AgentError
+
+    root = tmp_path / 'objects'
+    app = create_app(f'sqlite:///{tmp_path / "db.sqlite"}', dev_users={'owner':'password'}, storage_root=root)
+    config = tmp_path / 'config.toml'
+    config.write_text(f'[analysis]\ncode_root="{tmp_path.as_posix()}"\n')
+    usage = {'input':10, 'output':3, 'cache_read':2, 'cache_write':0, 'total':15}
+    class FakeAgent:
+        def analyze(self, question, tools):
+            tools.token_usage = usage
+            raise AgentError('provider_error')
+    monkeypatch.setattr(analysis_worker, 'load_agent', lambda _: FakeAgent())
+    with TestClient(app) as owner, TestClient(app) as guest:
+        csrf = {'X-CSRF-Token':owner.post('/api/dev/session', json={'username':'owner','password':'password'}).json()['csrf_token']}
+        project = owner.post('/api/projects', headers=csrf, json={'name':'项目'}).json()['id']
+        guest.post('/api/guest/session')
+        issue = guest.post('/api/guest/issues', data={'project_id':project,'module':'模块','description':'故障'}, files={'log':('error.log',b'error','text/plain')}).json()['id']
+        guest.post(f'/api/guest/issues/{issue}/analyze')
+        assert analysis_worker.process_analysis_one(app.state.engine, root, config)
+        with Session(app.state.engine) as db:
+            run = db.scalar(select(IssueAnalysis).where(IssueAnalysis.issue_id == issue))
+            assert run.state == 'failed'
+            assert db.get(IssueAnalysisUsage, run.id).usage == {**usage, 'partial': True}
+
+
+def test_analysis_bridge_retains_usage_on_provider_error(tmp_path):
+    import sys
+    import pytest
+    from workbench.questions.agent import AgentError, run_tool_process
+
+    script = tmp_path / 'agent.py'
+    script.write_text('import json, sys\nsys.stdin.readline()\nprint(json.dumps({"type":"usage","usage":{"input":10,"output":2,"cache_read":0,"cache_write":0,"total":12,"partial":False}}), flush=True)\nprint(json.dumps({"type":"error","reason":"provider_unavailable"}), flush=True)\n')
+    class Tools:
+        def list_resources(self): pass
+    tools = Tools()
+    with pytest.raises(AgentError, match='provider_unavailable'):
+        run_tool_process([sys.executable, str(script)], {'settings':{}}, {}, tools)
+    assert tools.token_usage == {'input':10, 'output':2, 'cache_read':0, 'cache_write':0, 'total':12, 'partial':False}

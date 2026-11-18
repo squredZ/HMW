@@ -289,10 +289,15 @@ def run_tool_process(command: list[str], payload: dict, env: dict, library, *, t
         process.stdin.flush()
         calls = 0
         while True:
+            cancelled = getattr(library, 'cancelled', None)
+            if cancelled is not None and cancelled.is_set():
+                raise AgentError('cancelled')
             try:
-                line = messages.get(timeout=max(0.001, deadline - time.monotonic()))
-            except queue.Empty as exc:
-                raise AgentError('timeout') from exc
+                line = messages.get(timeout=max(0.001, min(0.2, deadline - time.monotonic())))
+            except queue.Empty:
+                if time.monotonic() >= deadline:
+                    raise AgentError('timeout')
+                continue
             if expired.is_set() or time.monotonic() >= deadline:
                 raise AgentError('timeout')
             if exceeded.is_set():
@@ -305,6 +310,15 @@ def run_tool_process(command: list[str], payload: dict, env: dict, library, *, t
                 message = json.loads(line)
                 if not isinstance(message, dict):
                     raise ValueError()
+                if message.get('type') == 'usage' and hasattr(library, 'list_resources'):
+                    usage = message.get('usage')
+                    keys = {'input', 'output', 'cache_read', 'cache_write', 'total'}
+                    if (not isinstance(usage, dict) or set(usage) != keys | {'partial'} or
+                            type(usage['partial']) is not bool or
+                            any(type(usage[k]) is not int or not 0 <= usage[k] <= 2**53 - 1 for k in keys)):
+                        raise ValueError()
+                    library.token_usage = usage
+                    continue
                 if message.get('type') == 'error':
                     reason = message.get('reason')
                     raise AgentError(reason if reason in {'context_limit', 'output_limit', 'invalid_response', 'provider_auth', 'provider_rate_limited', 'provider_unavailable', 'provider_network'} else 'provider_error')
